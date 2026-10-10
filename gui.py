@@ -33,8 +33,9 @@ CONTROL_HOVER = ("#E4E7EB", "#323741")
 SELECTED = ("#FFFFFF", "#3C424C")
 BORDER = ("#D5D9DF", "#3B4049")
 CHECK_BORDER = ("#C3C8D0", "#4A505A")
-DANGER = ("#D93636", "#E5484D")
-DANGER_HOVER = ("#B92C2C", "#CE3B40")
+DANGER_BG = ("#FBEAEA", "#3A2426")
+DANGER_HOVER = ("#F6DCDC", "#45292B")
+DANGER_TEXT = ("#B42323", "#F3A6A3")
 
 
 def apply_theme(root):
@@ -96,6 +97,7 @@ class CheckGrid(tk.Canvas):
     def __init__(self, master, items, variables, columns=4):
         super().__init__(master, highlightthickness=0, bd=0, cursor="hand2")
         self.items, self.vars, self.columns = items, variables, columns
+        self.disabled = set()
         self.scale = ctk.ScalingTracker.get_widget_scaling(master)
         family = ctk.ThemeManager.theme["CTkFont"]["family"]
         self.font = tkfont.Font(family=family, size=-round(13 * self.scale))
@@ -115,22 +117,23 @@ class CheckGrid(tk.Canvas):
         for i, (code, text) in enumerate(self.items):
             x = pad_x + (i % self.columns) * col_w
             y = top + (i // self.columns) * row_h
-            on = self.vars[code].get()
+            off = code in self.disabled
+            on = self.vars[code].get() and not off
             tag = f"item_{code}"
             self._rounded(x, y + (row_h - box) / 2, box, round(5 * sc),
-                          fill=mode_color(ACCENT) if on else mode_color(INSET),
-                          outline=mode_color(ACCENT) if on else mode_color(CHECK_BORDER), width=max(1, round(1.5 * sc)),
-                          tags=tag)
+                          fill=mode_color(ACCENT) if on else mode_color(CONTROL if off else INSET),
+                          outline=mode_color(ACCENT) if on else mode_color(CONTROL_HOVER if off else CHECK_BORDER),
+                          width=max(1, round(1.5 * sc)), tags=tag)
             if on:
                 cy = y + row_h / 2
                 self.create_line(x + box * .25, cy, x + box * .43, cy + box * .18, x + box * .76, cy - box * .2,
                                  fill="#FFFFFF", width=max(2, round(2 * sc)), capstyle="round", joinstyle="round",
                                  tags=tag)
             self.create_text(x + box + gap, y + row_h / 2, text=text, anchor="w", font=self.font,
-                             fill=mode_color(TEXT), tags=tag)
+                             fill=mode_color(MUTED if off else TEXT), tags=tag)
             # niewidoczny prostokąt — klikalny cały wiersz, nie tylko litery
             self.create_rectangle(x - 4, y, x + col_w - pad_x, y + row_h, outline="", fill="", tags=tag)
-            self.tag_bind(tag, "<Button-1>", lambda _, c=code: self.vars[c].set(not self.vars[c].get()))
+            self.tag_bind(tag, "<Button-1>", lambda _, c=code: self.toggle(c))
         self.configure(width=self.columns * col_w + pad_x, height=rows * row_h + 2 * top)
 
     def _rounded(self, x, y, size, r, **kw):
@@ -138,6 +141,15 @@ class CheckGrid(tk.Canvas):
         pts = [x + r, y, x2 - r, y, x2, y, x2, y + r, x2, y2 - r, x2, y2, x2 - r, y2, x + r, y2, x, y2, x, y2 - r,
                x, y + r, x, y]
         self.create_polygon(pts, smooth=True, **kw)
+
+    def toggle(self, code):
+        if code not in self.disabled:
+            self.vars[code].set(not self.vars[code].get())
+
+    def set_disabled(self, codes):
+        if set(codes) != self.disabled:
+            self.disabled = set(codes)
+            self.draw()
 
     def sync_mode(self):
         if ctk.get_appearance_mode() != self.mode:
@@ -192,9 +204,10 @@ class Card(ctk.CTkFrame):
 class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
     def __init__(self):
         super().__init__()
+        self._set_icon()
         apply_theme(self)
-        self.geometry("1120x800")
-        self.minsize(980, 720)
+        self.geometry("1120x850")
+        self.minsize(980, 760)
         self.q = queue.Queue()
         self.cfg = core.load_config()
         i18n.set_lang(self.cfg.get("ui_lang"))
@@ -207,6 +220,7 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         self.grid_rowconfigure(0, weight=1)
         self.dnd = self._enable_drop()
         self.build()
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(100, self.poll)
 
     # ------------------------------------------------------------ budowa okna
@@ -253,13 +267,27 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         self.open_btn = self._secondary(bottom, t("open_folder"), self.open_folder, width=150)
         self.open_btn.configure(height=42)
         self.open_btn.grid(row=0, column=1, padx=(10, 0))
-        self.bar = ctk.CTkProgressBar(bottom, height=6)
+        self.bar = ctk.CTkProgressBar(bottom, height=8)
         self.bar.set(0)
         self.bar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        self.status = ctk.CTkLabel(bottom, text="", text_color=MUTED, font=font(12), anchor="w", height=18)
+        self.status.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         self._set_running(self.running)
 
         self._render_files()
         self.refresh_info()
+
+    def _set_icon(self):
+        assets = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+        try:
+            if os.name == "nt":
+                # CustomTkinter ustawia własną ikonę ~200 ms po starcie — nadpisujemy ją później
+                self.after(300, lambda: self.iconbitmap(os.path.join(assets, "icon.ico")))
+            else:
+                self._icon = tk.PhotoImage(file=os.path.join(assets, "icon.png"))
+                self.iconphoto(True, self._icon)
+        except (tk.TclError, OSError):
+            pass  # brak pliku ikony nie może zablokować programu
 
     def _enable_drop(self):
         """Pliki (i foldery) upuszczone gdziekolwiek na okno trafiają na listę."""
@@ -327,13 +355,15 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         c = Card(master, t("stt"))
         self.speech_map = {t("auto"): None, **{core.lang_name(code): code for code in core.LANGUAGES}}
         ctk.CTkLabel(c, text=t("speech_lang")).grid(row=1, column=0, sticky="w", padx=18, pady=5)
-        self.speech = ctk.CTkOptionMenu(c, values=list(self.speech_map), width=220, dynamic_resizing=False)
+        self.speech = ctk.CTkOptionMenu(c, values=list(self.speech_map), width=220, dynamic_resizing=False,
+                                        command=self._autosave)
         saved = self.cfg.get("speech", "auto")
         code = None if saved in (None, "auto") else core.resolve_language(saved)
         self.speech.set(core.lang_name(code) if code in core.LANGUAGES else t("auto"))
         self.speech.grid(row=1, column=1, sticky="w", padx=10, pady=5)
         ctk.CTkLabel(c, text=t("model")).grid(row=2, column=0, sticky="w", padx=18, pady=5)
-        self.model = ctk.CTkSegmentedButton(c, values=core.WHISPER_MODELS, command=lambda _: self.refresh_info())
+        self.model = ctk.CTkSegmentedButton(c, values=core.WHISPER_MODELS,
+                                            command=lambda _: (self.refresh_info(), self._autosave()))
         self.model.set(self.cfg.get("model", "large-v3"))
         self.model.grid(row=2, column=1, sticky="w", padx=10, pady=5)
         self.stt_info = ctk.CTkLabel(c, text="", text_color=MUTED, font=font(12), justify="left", wraplength=440)
@@ -343,11 +373,12 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
     def _format_card(self, master):
         c = Card(master, t("format"))
         ctk.CTkLabel(c, text=t("chars")).grid(row=1, column=0, sticky="w", padx=18, pady=5)
-        self.chars = ctk.CTkOptionMenu(c, values=[str(n) for n in (32, 37, 40, 42, 45, 50)], width=90)
+        self.chars = ctk.CTkOptionMenu(c, values=[str(n) for n in (32, 37, 40, 42, 45, 50)], width=90,
+                                       command=self._autosave)
         self.chars.set(str(self.cfg.get("chars", 42)))
         self.chars.grid(row=1, column=1, sticky="w", padx=10, pady=5)
         ctk.CTkLabel(c, text=t("lines")).grid(row=2, column=0, sticky="w", padx=18, pady=(5, 16))
-        self.lines = ctk.CTkSegmentedButton(c, values=["1", "2", "3"])
+        self.lines = ctk.CTkSegmentedButton(c, values=["1", "2", "3"], command=self._autosave)
         self.lines.set(str(self.cfg.get("lines", 2)))
         self.lines.grid(row=2, column=1, sticky="w", padx=10, pady=(5, 16))
         return c
@@ -385,6 +416,7 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         self.check_grid.grid(row=0, column=0, sticky="nw", padx=6, pady=6)
 
         self.other = ctk.CTkEntry(c, placeholder_text=t("other_langs"))
+        self._on_edit(self.other, self._autosave)
         if self.cfg.get("other"):
             self.other.insert(0, self.cfg["other"])
         self.other.grid(row=6, column=0, columnspan=3, sticky="ew", padx=18, pady=(12, 4))
@@ -394,7 +426,11 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         self.context = ctk.CTkTextbox(c, height=70, activate_scrollbars=False)  # mniej kanw = płynniejsza zmiana rozmiaru
         self.context.insert("1.0", self.cfg.get("context", ""))
         self.context.grid(row=8, column=0, columnspan=3, sticky="nsew", padx=18, pady=(0, 16))
+        self.context.bind("<KeyRelease>", self._autosave, add="+")
+        for v in self.targets.values():
+            v.trace_add("write", self._autosave)
         self._build_fields()
+        self._apply_engine_limits()
         return c
 
     # ------------------------------------------------------------ tłumacz i klucze
@@ -406,7 +442,16 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
     def on_engine(self, label):
         self.engine_code = next(k for k, v in self._engine_labels().items() if v == label)
         self._build_fields()
+        self._apply_engine_limits()
         self.refresh_info()
+        self._autosave()
+
+    def _apply_engine_limits(self):
+        """DeepL tłumaczy tylko na swoje języki: reszta listy i pole „Inne języki” są wtedy nieaktywne."""
+        deepl = self.engine_code == "deepl"
+        self.check_grid.set_disabled([c for c, (_, _, d) in core.LANGUAGES.items() if deepl and not d])
+        self.other.configure(state="disabled" if deepl else "normal", text_color=MUTED if deepl else TEXT,
+                             fg_color=CONTROL if deepl else ("#FFFFFF", "#191B1F"))
 
     def _build_fields(self):
         """Pola silnika w kolejności: adres serwera → klucz → model (lista modeli zależy od dwóch pierwszych)."""
@@ -558,7 +603,7 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
                 self.log_box.see("end")
                 self.log_box.configure(state="disabled")
             elif kind == "progress":
-                self.bar.set(val)
+                self._show_progress(*val)
             elif kind == "info" and val[0] == self.info_id:  # starsze, wolniejsze odpowiedzi pomijamy
                 self.stt_info.configure(text=val[1])
                 self.tr_info.configure(text=val[2])
@@ -573,6 +618,25 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
 
     # ------------------------------------------------------------ praca
 
+    def _autosave(self, *_):
+        """Zapis ustawień chwilę po zmianie (wybór języków, modeli, formatu, kontekstu…)."""
+        if getattr(self, "_save_job", None):
+            self.after_cancel(self._save_job)
+        self._save_job = self.after(500, self._save_now)
+
+    def _save_now(self):
+        self._save_job = None
+        try:
+            self._collect()
+            core.save_config(self.cfg)
+        except (tk.TclError, AttributeError):
+            pass  # okno w trakcie przebudowy
+
+    def on_close(self):
+        self._save_now()
+        core.CANCEL.set()  # zatrzymaj ewentualną pracę w tle
+        self.destroy()
+
     def _collect(self):
         """Stan formularza → self.cfg (bez kluczy — te są w magazynie haseł)."""
         speech = self.speech_map[self.speech.get()]
@@ -584,8 +648,9 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         )
 
     def _targets(self):
-        chosen = [c for c, v in self.targets.items() if v.get()]
-        chosen += [core.resolve_language(x) for x in self.other.get().split(",") if x.strip()]
+        chosen = [c for c, v in self.targets.items() if v.get() and c not in self.check_grid.disabled]
+        if self.engine_code != "deepl":
+            chosen += [core.resolve_language(x) for x in self.other.get().split(",") if x.strip()]
         return tuple(dict.fromkeys(chosen))
 
     def start(self):
@@ -614,9 +679,11 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
     def _set_running(self, running):
         self.running = running
         if running:
-            self.go.configure(text=t("stop"), state="normal", fg_color=DANGER, hover_color=DANGER_HOVER)
+            self.go.configure(text=t("stop"), state="normal", fg_color=DANGER_BG, hover_color=DANGER_HOVER,
+                              text_color=DANGER_TEXT)
         else:
-            self.go.configure(text=t("generate"), state="normal", fg_color=ACCENT, hover_color=ACCENT_HOVER)
+            self.go.configure(text=t("generate"), state="normal", fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                              text_color=("#FFFFFF", "#FFFFFF"))
         self.open_btn.configure(state="normal" if self.outputs else "disabled")
 
     def open_folder(self):
@@ -651,16 +718,38 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         else:
             subprocess.Popen(["xdg-open", os.path.dirname(path)])
 
+    def _show_progress(self, value, text):
+        """value None = etap bez znanego postępu (ładowanie / pobieranie modelu) → animowany pasek."""
+        if value is None:
+            if self.bar.cget("mode") != "indeterminate":
+                self.bar.configure(mode="indeterminate")
+                self.bar.start()
+        else:
+            if self.bar.cget("mode") != "determinate":
+                self.bar.stop()
+                self.bar.configure(mode="determinate")
+            self.bar.set(value)
+        self.status.configure(text=text)
+
     def work(self, files, opts):
+        n = len(files)
         try:
-            for path in files:
+            for i, path in enumerate(files):
                 self.log(f"=== {os.path.basename(path)}")
-                self.q.put(("progress", 0))
-                core.process_file(path, opts, self.log, lambda v: self.q.put(("progress", v)),
-                                  saved=lambda out: self.q.put(("output", out)))
+                prefix = os.path.basename(path) + (f" ({i + 1}/{n})" if n > 1 else "")
+
+                def progress(v, stage=None, i=i, prefix=prefix):  # postęp pliku → postęp całej kolejki
+                    overall = None if v is None else (i + v) / n
+                    pct = "" if v is None else f"{v:.0%}"
+                    self.q.put(("progress", (overall, " · ".join(x for x in (prefix, stage, pct) if x))))
+
+                progress(0, "")
+                core.process_file(path, opts, self.log, progress, saved=lambda out: self.q.put(("output", out)))
+            self.q.put(("progress", (1.0, t("done"))))
             self.log(t("done"))
         except core.Cancelled:
             self.log(t("cancelled"))
+            self.q.put(("progress", (0, t("cancelled"))))
         except Exception as e:
             self.log(t("error", err=e))
             self.log(traceback.format_exc())
@@ -669,5 +758,9 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
 
 
 if __name__ == "__main__":
+    if os.name == "nt":  # własna ikona na pasku zadań zamiast ikony Pythona
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("maclask.SubtitleGenerator")
     ctk.set_appearance_mode("system")
     App().mainloop()

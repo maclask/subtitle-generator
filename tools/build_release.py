@@ -17,7 +17,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIST = os.path.join(ROOT, "dist")
 
 COMMON = ["LICENSE", "README.md", "README.pl.md", "core.py", "i18n.py", "cli.py", "requirements-cli.txt"]
-GUI = ["gui.py", "requirements.txt"]
+GUI = ["gui.py", "requirements.txt", "shortcuts.py", "assets/icon.png", "assets/icon.ico", "assets/icon.icns"]
 SYSTEMS = {
     "windows": {"cli": ["setup.bat", "generator-cli.bat"], "gui": ["generator.bat"], "fmt": "zip"},
     "macos": {"cli": ["setup.sh", "generator-cli.sh"], "gui": ["generator.sh", "generator.command"], "fmt": "zip"},
@@ -29,6 +29,8 @@ EXECUTABLE = (".sh", ".command")
 def committed(path):
     """File content from HEAD (LF endings); .bat gets CRLF, which cmd.exe needs."""
     data = subprocess.run(["git", "show", f"HEAD:{path}"], cwd=ROOT, capture_output=True, check=True).stdout
+    if path.endswith((".png", ".ico", ".icns")):
+        return data  # pliki binarne bez zmian
     data = data.replace(b"\r\n", b"\n")
     return data.replace(b"\n", b"\r\n") if path.endswith(".bat") else data
 

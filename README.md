@@ -36,7 +36,7 @@ The command-line package doesn't need tkinter, which makes it a good fit for ser
 1. Install Python 3.13 from [python.org](https://www.python.org/downloads/). Keep the **py launcher** option enabled in the installer.
 2. Unpack the Windows package, or run `git clone https://github.com/maclask/subtitle-generator`.
 3. Double-click **`setup.bat`**. It creates a local environment in `.venv` and installs dependencies. This takes a few minutes.
-4. Start the app with **`generator.bat`**, or use `generator-cli.bat` for the command line.
+4. Start the app with the **Subtitle Generator** shortcut (setup adds it to the app folder and the Start menu), or with `generator.bat`. Use `generator-cli.bat` for the command line.
 
 ### macOS
 
@@ -46,9 +46,9 @@ The command-line package doesn't need tkinter, which makes it a good fit for ser
    ```sh
    sh setup.sh
    ```
-4. Start the app by double-clicking **`generator.command`**, or with `./generator.sh`.
+4. Start **Subtitle Generator.app** (setup creates it in the app folder; drag it to the Dock or Applications if you like), or run `./generator.sh`.
 
-> The first time, macOS may block `generator.command`. Right-click it, choose **Open**, then confirm.
+> If macOS blocks the app the first time, right-click it, choose **Open**, then confirm.
 
 ### Linux
 

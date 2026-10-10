@@ -36,7 +36,7 @@ Paczka konsolowa nie wymaga tkintera, więc dobrze sprawdza się na serwerach.
 1. Zainstaluj Pythona 3.13 z [python.org](https://www.python.org/downloads/). W instalatorze zostaw zaznaczoną opcję **py launcher**.
 2. Rozpakuj paczkę dla Windows albo uruchom `git clone https://github.com/maclask/subtitle-generator`.
 3. Kliknij dwukrotnie **`setup.bat`**. Skrypt tworzy lokalne środowisko w `.venv` i instaluje zależności. Trwa to kilka minut.
-4. Uruchamiaj program przez **`generator.bat`**, a wersję konsolową przez `generator-cli.bat`.
+4. Uruchamiaj program skrótem **Subtitle Generator** (setup tworzy go w folderze programu i w menu Start) albo przez `generator.bat`. Wersja konsolowa: `generator-cli.bat`.
 
 ### macOS
 
@@ -46,9 +46,9 @@ Paczka konsolowa nie wymaga tkintera, więc dobrze sprawdza się na serwerach.
    ```sh
    sh setup.sh
    ```
-4. Uruchamiaj program dwuklikiem w **`generator.command`** albo poleceniem `./generator.sh`.
+4. Uruchamiaj **Subtitle Generator.app** (setup tworzy ją w folderze programu; możesz ją przeciągnąć do Docka lub Programów) albo poleceniem `./generator.sh`.
 
-> Za pierwszym razem macOS może zablokować `generator.command`. Kliknij plik prawym przyciskiem, wybierz **Otwórz** i potwierdź.
+> Jeśli macOS za pierwszym razem zablokuje aplikację, kliknij ją prawym przyciskiem, wybierz **Otwórz** i potwierdź.
 
 ### Linux
 

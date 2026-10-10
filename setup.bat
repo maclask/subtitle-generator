@@ -19,8 +19,9 @@ echo Using: %PY%
 set REQ=requirements-cli.txt
 if exist gui.py set REQ=requirements.txt
 .venv\Scripts\python -m pip install -r %REQ% || goto :fail
+if exist gui.py .venv\Scripts\python shortcuts.py
 echo.
-if exist gui.py (echo Done. GUI: generator.bat    Command line: generator-cli.bat --help) else (echo Done. Command line: generator-cli.bat --help)
+if exist gui.py (echo Done. GUI: "Subtitle Generator" shortcut, Start menu or generator.bat    Command line: generator-cli.bat --help) else (echo Done. Command line: generator-cli.bat --help)
 pause
 exit /b 0
 

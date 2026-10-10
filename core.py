@@ -152,7 +152,9 @@ def _run_whisper(path, language, model_name, device, log, progress):
 
     compute = "float16" if device == "cuda" else "int8"
     dev = "GPU" if device == "cuda" else "CPU"
-    log(t("loading_model" if _model_cached(model_name) else "downloading_model", model=model_name, dev=dev))
+    cached = _model_cached(model_name)
+    log(t("loading_model" if cached else "downloading_model", model=model_name, dev=dev))
+    progress(None, t("stage_loading") if cached else t("stage_download"))
     model = WhisperModel(model_name, device=device, compute_type=compute)
     from faster_whisper import decode_audio
 
@@ -179,7 +181,7 @@ def _run_whisper(path, language, model_name, device, log, progress):
         for w in seg.words or []:
             words.append(Word(w.start, w.end, w.word))
         if info.duration:
-            progress(min(seg.end / info.duration, 1.0))
+            progress(min(seg.end / info.duration, 1.0), t("stage_stt"))
     return words, info.language
 
 
@@ -434,12 +436,12 @@ def engine_setting(settings, engine, field):
     return (settings or {}).get(key) or DEFAULTS.get(key, "")
 
 
-def translate(cues, src, tgt, engine, context, log, keys, settings=None):
+def translate(cues, src, tgt, engine, context, log, keys, settings=None, progress=lambda v: None):
     """engine: klucz z ENGINES; keys: klucze API; settings: modele / adresy (openai_model, custom_url…)."""
     log(t("translating", src=lang_name(src), tgt=lang_name(tgt), engine=ENGINES[engine], n=len(cues)))
     chunk = 80
     if engine == "deepl":
-        return _translate_deepl(cues, src, tgt, context, keys.get("deepl", ""))
+        return _translate_deepl(cues, src, tgt, context, keys.get("deepl", ""), progress)
     if engine == "api":
         import anthropic
 
@@ -464,7 +466,7 @@ def translate(cues, src, tgt, engine, context, log, keys, settings=None):
     else:
         exe = find_claude()
         ask = lambda system, user: _ask_cli(exe, system, user)
-    return _translate_llm(cues, src, tgt, context, log, ask, chunk)
+    return _translate_llm(cues, src, tgt, context, log, ask, chunk, progress)
 
 
 def _find_exe(name, missing_msg):
@@ -516,12 +518,13 @@ def _ask_openai(client, model, system, user):
     return _json_payload(resp.choices[0].message.content or "")["translations"]
 
 
-def _translate_llm(cues, src, tgt, context, log, ask, chunk=80):
+def _translate_llm(cues, src, tgt, context, log, ask, chunk=80, progress=lambda v: None):
     system = SYSTEM.format(src=_llm_lang(src), tgt=_llm_lang(tgt))
     out = [Cue(c.start, c.end, c.text) for c in cues]
 
     for start in range(0, len(cues), chunk):
         check_cancel()
+        progress(start / len(cues))
         batch = {i: cues[i].text for i in range(start, min(start + chunk, len(cues)))}
         if len(cues) > chunk:
             log(t("chunk", a=start + 1, b=start + len(batch)))
@@ -593,7 +596,7 @@ def _ask_api(client, model, system, user):
     return json.loads(text)["translations"]
 
 
-def _translate_deepl(cues, src, tgt, context, key, chunk=50):
+def _translate_deepl(cues, src, tgt, context, key, progress=lambda v: None, chunk=50):
     import deepl
 
     if not key:
@@ -606,6 +609,7 @@ def _translate_deepl(cues, src, tgt, context, key, chunk=50):
     out = []
     for start in range(0, len(cues), chunk):
         check_cancel()
+        progress(start / len(cues))
         batch = cues[start:start + chunk]
         # kontekst nie jest tłumaczony ani liczony do limitu znaków
         near = " ".join(c.text for c in cues[max(0, start - 5):start + chunk + 5])
@@ -703,7 +707,8 @@ def stt_info(model_name):
 
 # ---------------------------------------------------------------- konfiguracja i przetwarzanie pliku (GUI + CLI)
 
-CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+# SUBTITLE_GENERATOR_CONFIG: inny plik ustawień (np. do testów)
+CONFIG = os.environ.get("SUBTITLE_GENERATOR_CONFIG") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 WHISPER_MODELS = ["large-v3", "large-v3-turbo", "medium"]
 MEDIA_EXT = (".mp4", ".mov", ".mxf", ".mkv", ".avi", ".m4v", ".webm", ".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg")
 
@@ -792,8 +797,23 @@ class Options:
     settings: dict | None = None          # modele / adresy silników LLM (openai_model, custom_url…)
 
 
-def process_file(path, o, log, progress=lambda v: None, saved=lambda path: None):
-    """Wideo/audio → SRT (+ tłumaczenia). Plik .srt → tylko tłumaczenia. Zwraca listę zapisanych plików."""
+STT_WEIGHT, TRANSLATE_WEIGHT = 1.0, 0.4  # względny czas etapów (rozpoznawanie mowy vs jedno tłumaczenie)
+
+
+def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda path: None):
+    """Wideo/audio → SRT (+ tłumaczenia). Plik .srt → tylko tłumaczenia. Zwraca listę zapisanych plików.
+
+    progress(v, stage): v = postęp całego pliku 0–1 (None = etap bez procentów), stage = opis etapu."""
+    media = not path.lower().endswith(".srt")
+    n_tr = len([x for x in o.targets if x != o.language])
+    total = (STT_WEIGHT if media else 0) + TRANSLATE_WEIGHT * n_tr or 1
+    offset = 0.0
+
+    def stage(weight, label=None):
+        def report(v, lbl=None):
+            progress(None if v is None else (offset + v * weight) / total, lbl or label)
+        return report
+
     keys = o.keys or {}
     folder = o.out_dir or os.path.dirname(os.path.abspath(path))
     name = os.path.splitext(os.path.basename(path))[0]
@@ -808,7 +828,8 @@ def process_file(path, o, log, progress=lambda v: None, saved=lambda path: None)
         cues = read_srt(path)
         log(t("loaded_srt", n=len(cues)))
     else:
-        words, src = transcribe(path, o.language, o.model, log, progress)
+        words, src = transcribe(path, o.language, o.model, log, stage(STT_WEIGHT))
+        offset += STT_WEIGHT
         if not words:
             log(t("no_speech"))
             return written
@@ -823,11 +844,13 @@ def process_file(path, o, log, progress=lambda v: None, saved=lambda path: None)
         if tgt == src:
             continue
         check_cancel()
-        translated = translate(cues, src, tgt, o.engine, o.context, log, keys, o.settings)
+        translated = translate(cues, src, tgt, o.engine, o.context, log, keys, o.settings,
+                               stage(TRANSLATE_WEIGHT, t("stage_translate", lang=lang_name(tgt))))
+        offset = min(offset + TRANSLATE_WEIGHT, total)
         out = os.path.join(folder, f"{name}.{file_suffix(tgt)}.srt")
         write_srt(translated, out, o.chars)
         written.append(out)
         saved(out)
         log(t("saved", path=out))
-    progress(1.0)
+    progress(1.0, t("done"))
     return written

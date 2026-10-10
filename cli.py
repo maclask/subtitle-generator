@@ -34,7 +34,6 @@ i18n.S.update({
     "a_list": ("pokaż obsługiwane języki", "list supported languages"),
     "a_ui": ("język komunikatów: pl lub en", "message language: pl or en"),
     "translator_is": ("Tłumacz: {info}", "Translator: {info}"),
-    "progress": ("  rozpoznawanie mowy: {v:5.0%}", "  speech recognition: {v:5.0%}"),
     "claude_only": ("(tylko Claude)", "(Claude only)"),
 })
 
@@ -96,9 +95,9 @@ def main():
     return 1 if failed else 0
 
 
-def _progress(v):
-    if sys.stdout.isatty():
-        print("\r" + t("progress", v=v), end="\n" if v >= 1 else "", flush=True)
+def _progress(v, stage=None):
+    if sys.stdout.isatty() and v is not None:
+        print(f"\r  {stage or ''}: {v:5.0%}   ", end="\n" if v >= 1 else "", flush=True)
 
 
 if __name__ == "__main__":

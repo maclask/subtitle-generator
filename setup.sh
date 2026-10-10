@@ -5,7 +5,6 @@
 #   Fedora:           sudo dnf install python3-tkinter
 #   macOS (Homebrew): brew install python-tk   (python.org builds include tkinter)
 cd "$(dirname "$0")" || exit 1
-DIR="$(pwd)"
 
 PY=""
 for v in python3.13 python3.12 python3.11 python3.10 python3; do
@@ -28,18 +27,5 @@ if [ $GUI = 1 ]; then REQ=requirements.txt; else REQ=requirements-cli.txt; fi
 chmod +x ./*.sh ./*.command 2>/dev/null
 if [ $GUI = 0 ]; then echo "Done. Command line: ./generator-cli.sh --help"; exit 0; fi
 
-if [ "$(uname)" = "Linux" ]; then  # application menu entry
-    mkdir -p "$HOME/.local/share/applications"
-    cat > "$HOME/.local/share/applications/subtitle-generator.desktop" <<DESKTOP
-[Desktop Entry]
-Type=Application
-Name=Subtitle Generator
-Comment=Video / audio to SRT subtitles
-Exec="$DIR/generator.sh"
-Path=$DIR
-Terminal=false
-Categories=AudioVideo;Video;
-DESKTOP
-    echo "Added \"Subtitle Generator\" to the application menu."
-fi
-echo "Done. GUI: ./generator.sh (macOS: or double-click generator.command)   Command line: ./generator-cli.sh --help"
+.venv/bin/python shortcuts.py  # macOS: "Subtitle Generator.app", Linux: application menu entry
+echo "Done. GUI: Subtitle Generator.app (macOS) / application menu (Linux) / ./generator.sh   Command line: ./generator-cli.sh --help"
