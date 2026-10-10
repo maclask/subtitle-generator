@@ -819,7 +819,7 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         self._file_layout, self._file_rows, self._file_bar = (rows, scroll), [], None
         if not rows:
             ctk.CTkLabel(self.file_list, text=t("files_empty_dnd" if self.dnd else "files_empty"),
-                         text_color=MUTED, font=font(12)).grid(row=0, column=0, pady=22)
+                         text_color=MUTED, font=font(12), justify="center").grid(row=0, column=0, padx=16, pady=14)
             return
         for i in range(rows):
             pad = (8 if i == 0 else 0, 8 if i == rows - 1 else 0)
