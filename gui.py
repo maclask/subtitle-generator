@@ -162,6 +162,7 @@ class Tooltip:
         x, y = self.widget.winfo_pointerx() + round(12 * scale), self.widget.winfo_pointery() + round(18 * scale)
         self.tip = tk.Toplevel(self.widget)
         self.tip.wm_overrideredirect(True)
+        self.tip.attributes("-topmost", True)
         self.tip.wm_geometry(f"+{x}+{y}")
         border = tk.Frame(self.tip, bg=mode_color(BORDER))
         border.pack()
