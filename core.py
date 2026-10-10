@@ -75,6 +75,10 @@ class Cancelled(Exception):
     pass
 
 
+class AlreadyReported(Exception):
+    """Błąd został już wypisany w logu (np. wszystkie tłumaczenia się nie udały)."""
+
+
 def check_cancel():
     if CANCEL.is_set():
         raise Cancelled()
@@ -495,6 +499,21 @@ def translate(cues, src, tgt, engine, context, log, keys, settings=None, progres
         exe = find_claude()
         ask = lambda system, user: _ask_cli(exe, system, user)
     return _translate_llm(cues, src, tgt, context, log, ask, chunk, progress)
+
+
+def check_engine(engine, keys, settings=None):
+    """Szybkie sprawdzenie tłumacza przed pracą (bez wywołań płatnych API). RuntimeError z opisem, co poprawić."""
+    keys = keys or {}
+    if engine == "cli":
+        find_claude()
+    elif engine == "codex":
+        _find_exe("codex", t("codex_missing"))
+    elif engine in ("api", "openai", "deepl") and not keys.get(ENGINE_KEY[engine]):
+        raise RuntimeError(t("engine_no_key", engine=ENGINES[engine]))
+    if engine in ENGINE_FIELDS and any(not engine_setting(settings, engine, f) for f in ENGINE_FIELDS[engine]):
+        raise RuntimeError(t("llm_setup"))
+    if engine == "ollama" and not ollama_models(engine_setting(settings, "ollama", "url")):
+        raise RuntimeError(t("ollama_down"))
 
 
 def _find_exe(name, missing_msg):
@@ -985,6 +1004,6 @@ def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda
                 continue
             save(translated, plan[tgt], lambda out: t("saved", path=out), resolved=True)
     if failed and len(failed) == len(targets):
-        raise failed[0]
+        raise AlreadyReported()
     progress(1.0, t("done"))
     return written

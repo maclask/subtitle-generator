@@ -191,22 +191,18 @@ class Tooltip:
             self.tip = None
 
 
-class ExistsDialog(ctk.CTkToplevel):
-    """Plik wynikowy już istnieje: Nadpisz / Zapisz jako kopię / Pomiń (+ „dla wszystkich”)."""
+class ExistsPrompt(ctk.CTkFrame):
+    """Plik wynikowy już istnieje: Nadpisz / Zapisz jako kopię / Pomiń (+ „dla wszystkich”).
+
+    Panel wewnątrz okna programu, nie osobne okno: osobne okno CTk potrafiło zostać niewidoczne
+    (CustomTkinter sam je ukrywa/pokazuje przy kolorze paska tytułu) i blokować resztę programu, z Stop włącznie."""
 
     def __init__(self, master, path, on_answer):
-        super().__init__(master)
-        self.withdraw()  # pokażemy dopiero po ustawieniu na środku okna programu (inaczej mignie w rogu ekranu)
+        super().__init__(master, border_width=1, border_color=BORDER, corner_radius=14)
         self.on_answer, self.answered = on_answer, False
-        self.title(t("exists_title"))
-        self.resizable(False, False)
-        if os.name == "nt":  # CTkToplevel też nadpisuje ikonę po ~200 ms
-            ico = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icon.ico")
-            self.after(300, lambda: os.path.exists(ico) and self.iconbitmap(ico))
-        self.transient(master)
-        self.protocol("WM_DELETE_WINDOW", lambda: self.answer("skip"))
-        ctk.CTkLabel(self, text=t("exists_msg", path=os.path.normpath(path)), justify="left", wraplength=520).pack(
-            anchor="w", padx=24, pady=(20, 10))
+        ctk.CTkLabel(self, text=t("exists_title"), font=font(15, "bold")).pack(anchor="w", padx=24, pady=(20, 6))
+        ctk.CTkLabel(self, text=os.path.normpath(path), justify="left", wraplength=560, text_color=MUTED,
+                     font=font(12)).pack(anchor="w", padx=24, pady=(0, 12))
         self.all = tk.BooleanVar(value=False)
         ctk.CTkCheckBox(self, text=t("apply_all"), variable=self.all, checkbox_width=18, checkbox_height=18,
                         font=font(12)).pack(anchor="w", padx=24, pady=(0, 16))
@@ -216,18 +212,8 @@ class ExistsDialog(ctk.CTkToplevel):
         for key in ("overwrite", "skip"):
             ctk.CTkButton(row, text=t(key), fg_color="transparent", border_width=1, text_color=TEXT,
                           hover_color=CONTROL, command=lambda k=key: self.answer(k)).pack(side="right", padx=(0, 8))
-        self.after(10, self._center)
-
-    def _center(self):
-        m = self.master
-        self.update_idletasks()
-        x = m.winfo_rootx() + (m.winfo_width() - self.winfo_reqwidth()) // 2
-        y = m.winfo_rooty() + (m.winfo_height() - self.winfo_reqheight()) // 3
-        self.geometry(f"+{max(x, 0)}+{max(y, 0)}")
-        self.deiconify()
+        self.place(relx=0.5, rely=0.42, anchor="center")
         self.lift()
-        self.focus_force()
-        self.grab_set()
 
     def answer(self, choice):
         if not self.answered:
@@ -659,13 +645,14 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
                 self.tr_info.configure(text=val[2])
             elif kind == "ask_exists":
                 path, reply = val
-                ExistsDialog(self, path, reply)
+                self.prompt = ExistsPrompt(self, path, reply)
             elif kind == "models":
                 self._set_models(*val)
             elif kind == "output":
                 self.outputs.append(val)
                 self.open_btn.configure(state="normal")
             elif kind == "done":
+                self._close_prompt()
                 self._set_running(False)
         self.after(100, self.poll)
 
@@ -738,7 +725,14 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
             self.start()
         elif not core.CANCEL.is_set():
             core.CANCEL.set()  # wątek pracy zatrzyma się w najbliższym punkcie kontrolnym
+            self._close_prompt()
             self.go.configure(text=t("stopping"), state="disabled")
+
+    def _close_prompt(self):
+        prompt = getattr(self, "prompt", None)
+        if prompt is not None and prompt.winfo_exists():
+            prompt.destroy()
+        self.prompt = None
 
     def _set_running(self, running):
         self.running = running
@@ -818,6 +812,8 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
     def work(self, files, opts):
         n = len(files)
         try:
+            if opts.targets:  # niedostępny tłumacz zgłaszamy od razu, a nie po transkrypcji
+                core.check_engine(opts.engine, opts.keys, opts.settings)
             # najpierw wszystkie pytania o istniejące pliki — potem praca bez przerw
             plans = []
             for i, path in enumerate(files):
@@ -842,7 +838,11 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         except core.Cancelled:
             self.log(t("cancelled"))
             self.q.put(("progress", (0, t("cancelled"))))
-        except Exception as e:
+        except core.AlreadyReported:
+            pass  # błędy zostały już wypisane w logu
+        except RuntimeError as e:  # przewidziane błędy (brak klucza, brak CLI…) — sam komunikat
+            self.log(t("error", err=e))
+        except Exception as e:  # nieprzewidziane — ze śladem, żeby dało się zgłosić błąd
             self.log(t("error", err=e))
             self.log(traceback.format_exc())
         finally:

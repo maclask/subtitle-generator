@@ -86,6 +86,11 @@ def main():
                         settings=settings, on_exists=(lambda p: "overwrite") if a.overwrite else None)
 
     if targets:
+        try:  # niedostępny tłumacz zgłaszamy przed transkrypcją
+            core.check_engine(opts.engine, opts.keys, settings)
+        except RuntimeError as e:
+            print(t("error", err=e), file=sys.stderr)
+            return 1
         print(t("translator_is", info=core.engine_info(opts.engine, opts.keys, settings)))
     failed = 0
     for path in a.files:
