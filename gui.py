@@ -161,7 +161,7 @@ class App(ctk.CTk):
         self.keys = core.api_keys(self.cfg)
         self.paths = []
         self.running = False
-        self.last_output = None
+        self.outputs = []  # pliki zapisane w ostatnim uruchomieniu
         self.engine_code = self.cfg.get("engine", "cli")
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -459,7 +459,7 @@ class App(ctk.CTk):
                 self.stt_info.configure(text=val[1])
                 self.tr_info.configure(text=val[2])
             elif kind == "output":
-                self.last_output = val
+                self.outputs.append(val)
                 self.open_btn.configure(state="normal")
             elif kind == "done":
                 self._set_running(False)
@@ -494,6 +494,7 @@ class App(ctk.CTk):
             lines=self.cfg["lines"], keys=dict(self.keys), settings=dict(self.cfg),
         )
         core.CANCEL.clear()
+        self.outputs = []
         self._set_running(True)
         threading.Thread(target=self.work, args=(list(self.paths), opts), daemon=True).start()
 
@@ -510,15 +511,32 @@ class App(ctk.CTk):
             self.go.configure(text=t("stop"), state="normal", fg_color=DANGER, hover_color=DANGER_HOVER)
         else:
             self.go.configure(text=t("generate"), state="normal", fg_color=ACCENT, hover_color=ACCENT_HOVER)
-        self.open_btn.configure(state="normal" if self.last_output else "disabled")
+        self.open_btn.configure(state="normal" if self.outputs else "disabled")
 
     def open_folder(self):
-        """Otwiera folder z ostatnio zapisanym plikiem (i zaznacza go, gdzie się da)."""
+        """Jeden folder wyjściowy → otwórz go. Kilka (pliki z różnych folderów) → menu z listą folderów."""
+        folders = {}
+        for path in self.outputs:  # folder → ostatni zapisany w nim plik
+            folders[os.path.normpath(os.path.dirname(path))] = path
+        if len(folders) == 1:
+            self._reveal(next(iter(folders.values())))
+            return
+        scale = ctk.ScalingTracker.get_widget_scaling(self)  # natywne menu nie skaluje się samo
+        menu = tk.Menu(self, tearoff=0, font=tkfont.Font(family=ctk.ThemeManager.theme["CTkFont"]["family"],
+                                                         size=-round(13 * scale)))
+        for folder, path in folders.items():
+            menu.add_command(label=folder, command=lambda p=path: self._reveal(p))
+        x, y = self.open_btn.winfo_rootx(), self.open_btn.winfo_rooty()
+        menu.update_idletasks()
+        menu.tk_popup(x, y - menu.winfo_reqheight() - 4)
+
+    @staticmethod
+    def _reveal(path):
+        """Pokazuje plik w menedżerze plików (zaznaczony, gdzie się da)."""
         import subprocess
         import sys
 
-        path = self.last_output
-        if not path or not os.path.exists(path):
+        if not os.path.exists(path):
             return
         if sys.platform == "win32":
             subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
