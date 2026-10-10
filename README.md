@@ -12,7 +12,7 @@ The files work in Premiere Pro, DaVinci Resolve, Final Cut Pro, YouTube and othe
 
 ## Requirements
 
-| | |
+| Requirement | Details |
 |---|---|
 | Python | 3.10 – 3.13 ([python.org](https://www.python.org/downloads/)) |
 | Disk | about 6 GB (CUDA libraries and the Whisper model) |
