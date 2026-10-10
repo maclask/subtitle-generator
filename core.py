@@ -442,18 +442,20 @@ def _wrap_no_space(text, max_chars):
     return "\n".join(lines + [text])
 
 
-def wrap(text, max_chars=42):
-    """Dzieli tekst na 2 linie: równe długości, cięcie po przecinku, bez jednoliterowych słów na końcu."""
+def wrap(text, max_chars=42, max_lines=2):
+    """Dzieli tekst na linie: równe długości, cięcie po przecinku, bez jednoliterowych słów na końcu.
+    Gdy tekst (np. dłuższe tłumaczenie) nie mieści się w max_lines liniach, linie robią się dłuższe."""
     text = " ".join(text.split())
-    if len(text) <= max_chars:
+    if len(text) <= max_chars or max_lines <= 1:
         return text
     spaces = [m.start() for m in re.finditer(" ", text)]
     if not spaces or len(spaces) < len(text) / 25:  # pismo bez spacji (lub prawie bez)
         return _wrap_no_space(text, max_chars)
-    if len(text) <= 2 * max_chars + 5 and spaces:
-        best = min(spaces, key=lambda i: _break_cost(text, i, max_chars))
+    if max_lines == 2 or len(text) <= 2 * max_chars + 5:
+        width = max(max_chars, -(-len(text) // 2) + 5)
+        best = min(spaces, key=lambda i: _break_cost(text, i, width))
         return text[:best] + "\n" + text[best + 1:]
-    return "\n".join(textwrap.wrap(text, max_chars))
+    return "\n".join(textwrap.wrap(text, max(max_chars, -(-len(text) // max_lines) + 3)))
 
 
 # ---------------------------------------------------------------- SRT
@@ -466,11 +468,11 @@ def _ts(t):
     return f"{h:02}:{m:02}:{s:02},{ms:03}"
 
 
-def write_srt(cues, path, max_chars=42, lang=None):
+def write_srt(cues, path, max_chars=42, lang=None, max_lines=2):
     max_chars = line_chars(lang, max_chars)
     with open(path, "w", encoding="utf-8") as f:
         for i, c in enumerate(cues, 1):
-            f.write(f"{i}\n{_ts(c.start)} --> {_ts(c.end)}\n{wrap(c.text, max_chars) or '…'}\n\n")
+            f.write(f"{i}\n{_ts(c.start)} --> {_ts(c.end)}\n{wrap(c.text, max_chars, max_lines) or '…'}\n\n")
 
 
 _TS = re.compile(r"(?:(\d+):)?(\d+):(\d+)[,.](\d+)")
@@ -1129,7 +1131,7 @@ def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda
         out = target_path if resolved else resolve(target_path)
         if out is None:
             return
-        write_srt(cues, out, o.chars, lang)
+        write_srt(cues, out, o.chars, lang, o.lines)
         written.append(out)
         saved(out)
         log(message(out))
