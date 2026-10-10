@@ -57,8 +57,11 @@ def build(name, files, fmt):
 
 
 def main():
-    with open(os.path.join(ROOT, "core.py"), encoding="utf-8") as f:
-        version = re.search(r'__version__ = "([^"]+)"', f.read()).group(1)
+    # wersja z zacommitowanego core.py — tak jak zawartość paczek
+    version = re.search(r'__version__ = "([^"]+)"', committed("core.py").decode("utf-8")).group(1)
+    dirty = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, capture_output=True, text=True).stdout
+    if dirty.strip():
+        print("UWAGA: niezacommitowane zmiany nie trafią do paczek:\n" + dirty)
     for system, spec in SYSTEMS.items():
         cli_files = COMMON + spec["cli"]
         print(build(f"subtitle-generator-{version}-{system}", cli_files + GUI + spec["gui"], spec["fmt"]))

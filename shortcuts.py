@@ -6,6 +6,7 @@
 """
 import os
 import re
+import shlex
 import subprocess
 import sys
 
@@ -54,10 +55,17 @@ def macos():
 """)
     launcher = os.path.join(app, "Contents", "MacOS", "launcher")
     with open(launcher, "w", encoding="utf-8") as f:
-        f.write(f'#!/bin/sh\nexec "{DIR}/.venv/bin/python" "{DIR}/gui.py"\n')
+        python, gui = shlex.quote(f"{DIR}/.venv/bin/python"), shlex.quote(f"{DIR}/gui.py")
+        f.write(f"#!/bin/sh\nexec {python} {gui}\n")
     os.chmod(launcher, 0o755)
     os.utime(app)  # Finder odświeża ikonę
     return [app]
+
+
+def _desktop_quote(path):
+    """Cudzysłowy i znaki specjalne wg specyfikacji Desktop Entry (pole Exec)."""
+    escaped = "".join("\\" + c if c in '"`$\\' else c for c in path).replace("%", "%%")
+    return f'"{escaped}"'
 
 
 def linux():
@@ -69,7 +77,7 @@ def linux():
 Type=Application
 Name={NAME}
 Comment=Video / audio to SRT subtitles
-Exec="{DIR}/generator.sh"
+Exec={_desktop_quote(f"{DIR}/generator.sh")}
 Path={DIR}
 Icon={ICONS}/icon.png
 Terminal=false

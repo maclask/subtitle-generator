@@ -72,7 +72,7 @@ The Whisper model (about 3 GB for large-v3) downloads on the first transcription
 |---|---|
 | **Claude CLI** (default) | Install [Claude Code](https://claude.com/claude-code), run `claude` once and sign in with `/login`. No API key is needed. The app finds `claude` on your PATH or inside the Claude desktop app. |
 | **Claude API** | Paste an [Anthropic API key](https://console.anthropic.com/), or set `ANTHROPIC_API_KEY`. |
-| **Codex CLI** | `npm install -g @openai/codex`, then `codex login`. Uses your ChatGPT account. |
+| **Codex CLI** | `npm install -g @openai/codex`, then `codex login`. Uses your ChatGPT account. Codex is an agent that can read files on your computer (read-only sandbox), so for subtitles from untrusted sources prefer another translator. |
 | **OpenAI API** | Paste an [OpenAI API key](https://platform.openai.com/api-keys) (or set `OPENAI_API_KEY`) and enter a model name. |
 | **Ollama (local)** | Install [Ollama](https://ollama.com) and pull a model, e.g. `ollama pull qwen3`. Installed models appear in the list. Runs offline, but large models are slow on GPUs with little VRAM. |
 | **Custom API** | Any OpenAI-compatible endpoint: server URL, model, and an optional key (`CUSTOM_API_KEY`). Examples: `https://openrouter.ai/api/v1`, LM Studio `http://localhost:1234/v1`. |

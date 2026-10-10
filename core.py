@@ -127,7 +127,8 @@ def _run_proc(cmd, input_text, cwd=None):
     with tempfile.TemporaryDirectory() as tmp:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, encoding="utf-8", cwd=cwd or tmp, creationflags=flags,
-                                start_new_session=not win)
+                                start_new_session=not win,
+                                env=dict(os.environ, PATH=search_path()))  # np. skrypt npm potrzebuje `node`
         with _ACTIVE_LOCK:
             _ACTIVE.add(proc)
         try:
@@ -568,12 +569,28 @@ def _llm_lang(code):
     return LANGUAGES[code][1] if code in LANGUAGES else code
 
 
+def search_path():
+    """PATH + typowe miejsca instalacji CLI (npm, Homebrew…). Aplikacja uruchomiona z Findera albo menu
+    aplikacji dostaje okrojony PATH (/usr/bin:/bin…), więc sam PATH by ich nie znalazł."""
+    home = os.path.expanduser("~")
+    extra = [] if sys.platform == "win32" else [
+        "/opt/homebrew/bin", "/usr/local/bin", os.path.join(home, ".local", "bin"),
+        os.path.join(home, ".npm-global", "bin"), os.path.join(home, ".bun", "bin"),
+        os.path.join(home, ".volta", "bin"), "/snap/bin"]
+    if sys.platform != "win32":  # nvm: bieżąca (najnowsza) wersja node
+        import glob
+
+        extra += sorted(glob.glob(os.path.join(home, ".nvm", "versions", "node", "*", "bin")), reverse=True)
+    parts = os.environ.get("PATH", "").split(os.pathsep)
+    return os.pathsep.join(dict.fromkeys(parts + [d for d in extra if os.path.isdir(d)]))
+
+
 def find_claude():
     """claude z PATH, a jeśli go nie ma — najnowsza kopia z aplikacji desktopowej Claude."""
     import glob
     import shutil
 
-    exe = shutil.which("claude")
+    exe = shutil.which("claude", path=search_path())
     if exe:
         return exe
     home = os.path.expanduser("~")
@@ -651,7 +668,7 @@ def check_engine(engine, keys, settings=None):
 def _find_exe(name, missing_msg):
     import shutil
 
-    exe = shutil.which(name)
+    exe = shutil.which(name, path=search_path())
     if not exe:
         raise RuntimeError(missing_msg)
     return exe
@@ -908,8 +925,11 @@ def load_config():
 
 
 def save_config(cfg):
-    with open(CONFIG, "w", encoding="utf-8") as f:
+    """Zapis przez plik tymczasowy + os.replace — przerwany zapis nie zniszczy ustawień."""
+    tmp = CONFIG + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, CONFIG)
 
 
 __version__ = "1.0.0"
@@ -1078,9 +1098,16 @@ def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda
     if o.out_dir:
         os.makedirs(o.out_dir, exist_ok=True)  # brak folderu zgłosilibyśmy dopiero po transkrypcji
 
+    shown = [0.0]
+
+    def monotonic(v, label):  # postęp pliku nigdy się nie cofa
+        if v is not None:
+            v = shown[0] = max(shown[0], min(v, 1.0))
+        progress(v, label)
+
     def stage(weight, label=None):
         def report(v, lbl=None):
-            progress(None if v is None else (offset + v * weight) / total, lbl or label)
+            monotonic(None if v is None else (offset + v * weight) / total, lbl or label)
         return report
 
     keys = o.keys or {}
@@ -1145,7 +1172,7 @@ def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda
         finished = sum(1 for x in done.values() if x >= 1)
         label = (t("stage_translate", lang=lang_name(tgt)) if len(targets) == 1
                  else t("stage_translate_n", done=finished, n=len(targets)))
-        progress(min(offset + TRANSLATE_WEIGHT * sum(done.values()), total) / total, label)
+        monotonic(min(offset + TRANSLATE_WEIGHT * sum(done.values()), total) / total, label)
 
     def job(tgt):
         check_cancel()

@@ -523,7 +523,7 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
             self.key = ctk.CTkEntry(self.fields, show="•", placeholder_text=hint)
             if self.keys.get(name):
                 self.key.insert(0, self.keys[name])
-            self._on_edit(self.key, self._store_key)
+            self._on_edit(self.key, self._schedule_store_key)
             add_row(label, self.key)
         if "model" in fields:
             value = core.engine_setting(self.cfg, engine, "model")
@@ -571,6 +571,12 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
             self.cfg[f"{self.engine_code}_{field}"] = w.get().strip()
         core.save_config(self.cfg)
         self.refresh_info()
+
+    def _schedule_store_key(self):
+        """Zapis klucza 0,6 s po ostatniej zmianie — magazyn haseł nie dostaje każdego znaku osobno."""
+        if getattr(self, "_key_job", None):
+            self.after_cancel(self._key_job)
+        self._key_job = self.after(600, self._store_key)
 
     def _store_key(self):
         """Klucz trafia od razu do systemowego magazynu haseł, więc jest pamiętany między uruchomieniami."""
@@ -742,6 +748,8 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
             core.save_config(self.cfg)
         except (tk.TclError, AttributeError):
             pass  # okno w trakcie przebudowy
+        except OSError as e:  # np. folder programu tylko do odczytu
+            self.log(t("error", err=e))
 
     def on_close(self):
         self._save_now()
