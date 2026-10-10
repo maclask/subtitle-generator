@@ -196,6 +196,7 @@ class ExistsDialog(ctk.CTkToplevel):
 
     def __init__(self, master, path, on_answer):
         super().__init__(master)
+        self.withdraw()  # pokażemy dopiero po ustawieniu na środku okna programu (inaczej mignie w rogu ekranu)
         self.on_answer, self.answered = on_answer, False
         self.title(t("exists_title"))
         self.resizable(False, False)
@@ -215,14 +216,15 @@ class ExistsDialog(ctk.CTkToplevel):
         for key in ("overwrite", "skip"):
             ctk.CTkButton(row, text=t(key), fg_color="transparent", border_width=1, text_color=TEXT,
                           hover_color=CONTROL, command=lambda k=key: self.answer(k)).pack(side="right", padx=(0, 8))
-        self.after(50, self._center)
+        self.after(10, self._center)
 
     def _center(self):
         m = self.master
         self.update_idletasks()
-        x = m.winfo_rootx() + (m.winfo_width() - self.winfo_width()) // 2
-        y = m.winfo_rooty() + (m.winfo_height() - self.winfo_height()) // 3
-        self.geometry(f"+{x}+{y}")
+        x = m.winfo_rootx() + (m.winfo_width() - self.winfo_reqwidth()) // 2
+        y = m.winfo_rooty() + (m.winfo_height() - self.winfo_reqheight()) // 3
+        self.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        self.deiconify()
         self.lift()
         self.focus_force()
         self.grab_set()
@@ -816,6 +818,13 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
     def work(self, files, opts):
         n = len(files)
         try:
+            # najpierw wszystkie pytania o istniejące pliki — potem praca bez przerw
+            plans = []
+            for i, path in enumerate(files):
+                stage = t("stage_checking") + (f" ({i + 1}/{n})" if n > 1 else "")
+                self.q.put(("progress", (None, stage)))
+                plans.append(core.plan_outputs(path, opts, self.log,
+                                               lambda v, s=None, st=stage: self.q.put(("progress", (None, f"{st} · {s}" if s else st)))))
             for i, path in enumerate(files):
                 self.log(f"=== {os.path.basename(path)}")
                 prefix = os.path.basename(path) + (f" ({i + 1}/{n})" if n > 1 else "")
@@ -826,7 +835,8 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
                     self.q.put(("progress", (overall, " · ".join(x for x in (prefix, stage, pct) if x))))
 
                 progress(0, "")
-                core.process_file(path, opts, self.log, progress, saved=lambda out: self.q.put(("output", out)))
+                core.process_file(path, opts, self.log, progress, saved=lambda out: self.q.put(("output", out)),
+                                  plan=plans[i])
             self.q.put(("progress", (1.0, t("done"))))
             self.log(t("done"))
         except core.Cancelled:

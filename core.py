@@ -5,7 +5,7 @@ import re
 import sys
 import textwrap
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from i18n import t
 
@@ -147,15 +147,25 @@ def _add_cuda_dll_paths():
                         pass
 
 
-def _run_whisper(path, language, model_name, device, log, progress):
+_LOADED = {}  # (model, urządzenie) → WhisperModel; zostaje w pamięci między plikami i zadaniami
+
+
+def _load_model(model_name, device, log, progress):
     from faster_whisper import WhisperModel
 
-    compute = "float16" if device == "cuda" else "int8"
-    dev = "GPU" if device == "cuda" else "CPU"
-    cached = _model_cached(model_name)
-    log(t("loading_model" if cached else "downloading_model", model=model_name, dev=dev))
-    progress(None, t("stage_loading") if cached else t("stage_download"))
-    model = WhisperModel(model_name, device=device, compute_type=compute)
+    key = (model_name, device)
+    if key not in _LOADED:
+        _LOADED.clear()  # jeden model naraz — pamięć karty
+        dev = "GPU" if device == "cuda" else "CPU"
+        cached = _model_cached(model_name)
+        log(t("loading_model" if cached else "downloading_model", model=model_name, dev=dev))
+        progress(None, t("stage_loading") if cached else t("stage_download"))
+        _LOADED[key] = WhisperModel(model_name, device=device, compute_type="float16" if device == "cuda" else "int8")
+    return _LOADED[key]
+
+
+def _run_whisper(path, language, model_name, device, log, progress):
+    model = _load_model(model_name, device, log, progress)
     from faster_whisper import decode_audio
 
     audio = decode_audio(path)
@@ -195,18 +205,36 @@ def _model_cached(model_name):
         return False
 
 
-def transcribe(path, language, model_name, log, progress):
-    """Zwraca (lista słów z czasami, wykryty język). Najpierw GPU, w razie błędu CPU."""
+def _on_gpu_or_cpu(run, log):
+    """run(device): najpierw GPU, a gdy CUDA zawiedzie — CPU."""
     _add_cuda_dll_paths()
     try:
-        return _run_whisper(path, language, model_name, "cuda", log, progress)
+        return run("cuda")
     except Cancelled:
         raise
     except Exception as e:  # brak CUDA/cuDNN, nieobsługiwana karta itp.
         if not any(w in str(e).lower() for w in ("cuda", "cublas", "cudnn", "gpu", "device", "dll", ".so")):
             raise  # np. uszkodzony plik — CPU nic tu nie pomoże
         log(t("gpu_failed", err=e))
-        return _run_whisper(path, language, model_name, "cpu", log, progress)
+        return run("cpu")
+
+
+def transcribe(path, language, model_name, log, progress):
+    """Zwraca (lista słów z czasami, wykryty język)."""
+    return _on_gpu_or_cpu(lambda device: _run_whisper(path, language, model_name, device, log, progress), log)
+
+
+def detect_language(path, model_name, log, progress=lambda v, stage=None: None):
+    """Szybkie wykrycie języka mowy (bez transkrypcji)."""
+    def run(device):
+        from faster_whisper import decode_audio
+
+        model = _load_model(model_name, device, log, progress)
+        progress(None, t("stage_detect"))
+        lang, prob, _ = model.detect_language(decode_audio(path), vad_filter=True, language_detection_segments=3)
+        log(t("detected_short", lang=lang_name(lang), prob=prob))
+        return lang
+    return _on_gpu_or_cpu(run, log)
 
 
 # ---------------------------------------------------------------- podział na napisy
@@ -825,7 +853,36 @@ PARALLEL = {"ollama": 1}
 MAX_PARALLEL = 4
 
 
-def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda path: None):
+def _names(path, o, src=None):
+    folder = o.out_dir or os.path.dirname(os.path.abspath(path))
+    name = os.path.splitext(os.path.basename(path))[0]
+    if src and path.lower().endswith(".srt") and name.lower().endswith("." + src):  # film.pl.srt → film
+        name = name[: -len(src) - 1]
+    return folder, name
+
+
+def plan_outputs(path, o, log, progress=lambda v, stage=None: None):
+    """Przed jakąkolwiek pracą: decyzje o plikach, które już istnieją (pyta przez o.on_exists).
+
+    Zwraca {"src": język źródła lub None, "out": {język: ścieżka zapisu lub None = pomiń}}.
+    Przy automatycznym wykrywaniu język mowy ustalamy tylko wtedy, gdy obok leży już jakiś plik napisów."""
+    media = not path.lower().endswith(".srt")
+    src = o.language
+    folder, name = _names(path, o, src)
+    if media and not src and any(os.path.exists(os.path.join(folder, f"{name}.{c}.srt")) for c in LANGUAGES):
+        src = detect_language(path, o.model, log, progress)
+    langs = ([src] if media and src else []) + [x for x in dict.fromkeys(o.targets) if x != src]
+    out = {}
+    for lang in langs:
+        check_cancel()
+        target = os.path.join(folder, f"{name}.{file_suffix(lang)}.srt")
+        out[lang] = output_path(target, o.on_exists)
+        if out[lang] is None:
+            log(t("skipped_existing", path=target))
+    return {"src": src, "out": out}
+
+
+def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda path: None, plan=None):
     """Wideo/audio → SRT (+ tłumaczenia). Plik .srt → tylko tłumaczenia. Zwraca listę zapisanych plików.
 
     progress(v, stage): v = postęp całego pliku 0–1 (None = etap bez procentów), stage = opis etapu."""
@@ -842,11 +899,15 @@ def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda
         return report
 
     keys = o.keys or {}
-    folder = o.out_dir or os.path.dirname(os.path.abspath(path))
-    name = os.path.splitext(os.path.basename(path))[0]
+    if plan and plan["src"] and media:
+        o = replace(o, language=plan["src"])  # język ustalony już przy planowaniu
+    folder, name = _names(path, o, o.language)
     written = []
+    decided = (plan or {}).get("out", {})
 
-    def resolve(target_path):
+    def resolve(target_path, lang=None):
+        if lang in decided:  # decyzja zapadła przed pracą
+            return decided[lang]
         out = output_path(target_path, o.on_exists)
         if out is None:
             log(t("skipped_existing", path=target_path))
@@ -865,10 +926,14 @@ def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda
         src = o.language
         if not src:
             raise RuntimeError(t("srt_needs_lang"))
-        if name.lower().endswith("." + src):  # film.pl.srt → film
-            name = name[: -len(src) - 1]
         cues = read_srt(path)
         log(t("loaded_srt", n=len(cues)))
+    elif o.language in decided and decided[o.language] is None and \
+            os.path.exists(existing := os.path.join(folder, f"{name}.{o.language}.srt")):
+        # transkrypcja już jest i ma zostać — tłumaczymy ją zamiast rozpoznawać mowę od nowa
+        src, cues = o.language, read_srt(existing)
+        log(t("using_existing", path=existing))
+        offset += STT_WEIGHT
     else:
         words, src = transcribe(path, o.language, o.model, log, stage(STT_WEIGHT))
         offset += STT_WEIGHT
@@ -876,14 +941,15 @@ def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda
             log(t("no_speech"))
             return written
         cues = build_cues(words, o.chars, o.lines)
-        save(cues, os.path.join(folder, f"{name}.{src}.srt"), lambda out: t("saved_n", path=out, n=len(cues)))
+        out = resolve(os.path.join(folder, f"{name}.{src}.srt"), src)
+        save(cues, out, lambda out: t("saved_n", path=out, n=len(cues)), resolved=True)
 
     # o istniejące pliki tłumaczeń pytamy przed tłumaczeniem — pominięte języki nie są tłumaczone
     plan = {}
     for tgt in dict.fromkeys(o.targets):
         if tgt != src:
             check_cancel()
-            out = resolve(os.path.join(folder, f"{name}.{file_suffix(tgt)}.srt"))
+            out = resolve(os.path.join(folder, f"{name}.{file_suffix(tgt)}.srt"), tgt)
             if out:
                 plan[tgt] = out
     targets = list(plan)
