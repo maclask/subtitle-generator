@@ -97,6 +97,8 @@ def main():
         print(f"=== {path}")
         try:
             core.process_file(path, opts, print, _progress)
+        except core.AlreadyReported:  # błędy tłumaczeń są już wypisane
+            failed += 1
         except Exception as e:
             print("\n" + t("error", err=e), file=sys.stderr)
             failed += 1
