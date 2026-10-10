@@ -206,7 +206,7 @@ def _load_model(model_name, device, log, progress):
     key = (model_name, device)
     if key not in _LOADED:
         dev = "GPU" if device == "cuda" else "CPU"
-        cached = _model_cached(model_name)
+        cached = model_cached(model_name)
         log(t("loading_model" if cached else "downloading_model", model=model_name, dev=dev))
         progress(None, t("stage_loading") if cached else t("stage_download"))
         model = WhisperModel(model_name, device=device, compute_type="float16" if device == "cuda" else "int8")
@@ -256,7 +256,8 @@ def _run_whisper(path, language, model_name, device, log, progress):
     return words, info.language
 
 
-def _model_cached(model_name):
+def model_cached(model_name):
+    """Czy model Whisper jest już pobrany (kompletny model.bin w cache Hugging Face)."""
     try:
         from faster_whisper.utils import _MODELS
         from huggingface_hub import try_to_load_from_cache
@@ -264,6 +265,63 @@ def _model_cached(model_name):
         return isinstance(try_to_load_from_cache(_MODELS.get(model_name, model_name), "model.bin"), str)
     except Exception:
         return False
+
+
+
+def _dir_size(path):
+    """getsize, nie scandir: na Windows scandir podaje nieaktualny rozmiar pliku, który jest właśnie zapisywany."""
+    total = 0
+    try:
+        for name in os.listdir(path):
+            try:
+                total += os.path.getsize(os.path.join(path, name))
+            except OSError:
+                pass  # plik właśnie przenoszony
+    except OSError:
+        pass
+    return total
+
+
+def download_model(model_name, progress=lambda done, total: None, cancel=None):
+    """Pobiera model Whisper w osobnym procesie — anulowanie (cancel.set()) od razu go zabija.
+    Przerwane pobieranie zostawia częściowe pliki; następne je wznowi.
+
+    progress(done, total) w bajtach: postęp liczony z rozmiaru plików w cache (działa też z hf_xet)."""
+    import subprocess
+    import tempfile
+    import time
+
+    from faster_whisper.utils import _MODELS
+    from huggingface_hub import constants
+
+    repo = _MODELS.get(model_name, model_name)
+    blobs = os.path.join(constants.HF_HUB_CACHE, "models--" + repo.replace("/", "--"), "blobs")
+    total = int(WHISPER_SIZES.get(model_name, 0) * 1e9)
+    win = sys.platform == "win32"
+    code = "import sys; from faster_whisper.utils import download_model; download_model(sys.argv[1])"
+    with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as err:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", code, model_name], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=err, creationflags=(subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if win else 0,
+            start_new_session=not win)
+        with _ACTIVE_LOCK:
+            _ACTIVE.add(proc)  # zamknięcie okna też przerywa pobieranie
+        try:
+            while proc.poll() is None:
+                if cancel is not None and cancel.is_set():
+                    _kill_tree(proc)
+                    proc.wait()
+                    raise Cancelled()
+                progress(min(_dir_size(blobs), total), total)
+                time.sleep(0.4)
+        finally:
+            with _ACTIVE_LOCK:
+                _ACTIVE.discard(proc)
+        if proc.returncode or not model_cached(model_name):
+            err.seek(0)
+            lines = [x for x in err.read().strip().splitlines() if x.strip()]
+            raise RuntimeError(t("download_failed", model=model_name, err=lines[-1] if lines else proc.returncode))
+    progress(total, total)
 
 
 _gpu_usable = None  # None = nie wiadomo; False po pierwszej porażce — potem od razu CPU
@@ -458,21 +516,74 @@ def wrap(text, max_chars=42, max_lines=2):
     return "\n".join(textwrap.wrap(text, max(max_chars, -(-len(text) // max_lines) + 3)))
 
 
-# ---------------------------------------------------------------- SRT
+# ---------------------------------------------------------------- zapis: SRT / WebVTT / ASS / TXT
 
-def _ts(t):
+FORMATS = {
+    "srt": "SRT",
+    "vtt": "WebVTT",
+    "ass": "ASS",
+    "txt": "TXT",  # sam tekst, bez czasów
+}
+SUB_EXT = (".srt", ".vtt", ".ass")  # pliki napisów, które da się wczytać do tłumaczenia
+
+
+def is_subtitle(path):
+    return path.lower().endswith(SUB_EXT)
+
+
+def _ts(t, sep=","):
     ms = int(round(t * 1000))
     h, ms = divmod(ms, 3_600_000)
     m, ms = divmod(ms, 60_000)
     s, ms = divmod(ms, 1000)
-    return f"{h:02}:{m:02}:{s:02},{ms:03}"
+    return f"{h:02}:{m:02}:{s:02}{sep}{ms:03}"
 
 
-def write_srt(cues, path, max_chars=42, lang=None, max_lines=2):
+def _ts_ass(t):
+    cs = int(round(t * 100))
+    h, cs = divmod(cs, 360_000)
+    m, cs = divmod(cs, 6000)
+    s, cs = divmod(cs, 100)
+    return f"{h}:{m:02}:{s:02}.{cs:02}"
+
+
+ASS_HEADER = """[Script Info]
+ScriptType: v4.00+
+PlayResX: 1920
+PlayResY: 1080
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,64,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,3,1,2,120,120,60,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+
+def write_subs(cues, path, max_chars=42, lang=None, max_lines=2):
+    """Format wg rozszerzenia pliku (.srt / .vtt / .ass / .txt)."""
     max_chars = line_chars(lang, max_chars)
+    fmt = os.path.splitext(path)[1].lower().lstrip(".")
+    text = lambda c: wrap(c.text, max_chars, max_lines) or "…"
     with open(path, "w", encoding="utf-8") as f:
-        for i, c in enumerate(cues, 1):
-            f.write(f"{i}\n{_ts(c.start)} --> {_ts(c.end)}\n{wrap(c.text, max_chars, max_lines) or '…'}\n\n")
+        if fmt == "vtt":
+            f.write("WEBVTT\n\n")
+            for c in cues:  # w WebVTT „&” i „<” mają specjalne znaczenie
+                body = text(c).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                f.write(f"{_ts(c.start, '.')} --> {_ts(c.end, '.')}\n{body}\n\n")
+        elif fmt == "ass":
+            f.write(ASS_HEADER)
+            for c in cues:  # „{…}” to w ASS znaczniki stylu, \N — nowa linia
+                body = text(c).replace("{", "(").replace("}", ")").replace("\n", "\\N")
+                f.write(f"Dialogue: 0,{_ts_ass(c.start)},{_ts_ass(c.end)},Default,,0,0,0,,{body}\n")
+        elif fmt == "txt":
+            f.write("\n".join(c.text.strip() for c in cues if c.text.strip()) + "\n")
+        else:
+            for i, c in enumerate(cues, 1):
+                f.write(f"{i}\n{_ts(c.start)} --> {_ts(c.end)}\n{text(c)}\n\n")
 
 
 _TS = re.compile(r"(?:(\d+):)?(\d+):(\d+)[,.](\d+)")
@@ -499,27 +610,58 @@ def _read_text(path):
     return raw.decode("latin-1")
 
 
-def read_srt(path):
+def _read_ass(lines):
+    cues, fields = [], None
+    for line in lines:
+        key, _, value = line.partition(":")
+        if key.strip() == "Format":
+            fields = [x.strip().lower() for x in value.split(",")]
+        elif key.strip() == "Dialogue" and fields and "text" in fields:
+            row = [x.strip() for x in value.split(",", len(fields) - 1)]
+            if len(row) != len(fields):
+                continue
+            row = dict(zip(fields, row))
+            text = re.sub(r"\{[^}]*\}", "", row["text"])  # znaczniki stylu
+            text = re.sub(r"\\[Nnh]", " ", text)
+            try:
+                cues.append(Cue(_parse_ts(row["start"]), _parse_ts(row["end"]), " ".join(text.split())))
+            except (KeyError, ValueError):
+                continue
+    return sorted(cues, key=lambda c: c.start)
+
+
+def read_subs(path):
+    """Napisy z pliku .srt / .vtt / .ass (sam tekst, bez formatowania)."""
     lines = _read_text(path).replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    cues = _read_ass(lines) if path.lower().endswith(".ass") else _read_srt_vtt(lines, path.lower().endswith(".vtt"))
+    if not cues:
+        raise RuntimeError(t("srt_empty", path=path))
+    return cues
+
+
+def _read_srt_vtt(lines, vtt):
+    import html
+
     cues = []
     for i, line in enumerate(lines):
         if "-->" not in line:
             continue
         a, z = line.split("-->", 1)
         try:
-            start, end = _parse_ts(a), _parse_ts(z)
+            start, end = _parse_ts(a), _parse_ts(z)  # w WebVTT po czasie mogą być ustawienia (align:…)
         except ValueError:
             continue
         text = []  # treść: do następnej linii z czasem (pusta linia w środku napisu nie ucina tekstu)
         for nxt in lines[i + 1:]:
-            if "-->" in nxt:
+            if "-->" in nxt or (vtt and not nxt.strip()):  # w WebVTT pusta linia kończy napis
                 break
             text.append(nxt.strip())
         while text and (not text[-1] or text[-1].isdigit()):  # pusta linia i numer następnego napisu
             text.pop()
-        cues.append(Cue(start, end, " ".join(x for x in text if x)))
-    if not cues:
-        raise RuntimeError(t("srt_empty", path=path))
+        body = " ".join(x for x in text if x)
+        if vtt:  # <v Jan>, <i>, <00:01.000>, &amp;
+            body = html.unescape(re.sub(r"<[^>]*>", "", body)).strip()
+        cues.append(Cue(start, end, body))
     return cues
 
 
@@ -622,9 +764,48 @@ def engine_setting(settings, engine, field):
 def translate(cues, src, tgt, engine, context, log, keys, settings=None, progress=lambda v: None):
     """engine: klucz z ENGINES; keys: klucze API; settings: modele / adresy (openai_model, custom_url…)."""
     log(t("translating", src=lang_name(src), tgt=lang_name(tgt), engine=ENGINES[engine], n=len(cues)))
-    chunk = 80
     if engine == "deepl":
         return _translate_deepl(cues, src, tgt, context, keys.get("deepl", ""), progress)
+    ask, chunk = _llm(engine, keys, settings)
+    system = SYSTEM.format(src=_llm_lang(src), tgt=_llm_lang(tgt))
+    return _llm_cues(cues, system, context, log, ask, chunk, progress)
+
+
+SYSTEM_CORRECT = """You proofread automatic speech recognition (ASR) output that will be used as {lang} subtitles for video.
+
+- Return exactly one text for every id you receive, with the same ids.
+- Fix misheard words, names, terms and numbers, spelling, capitalization and punctuation. Use the context and the neighbouring cues to work out what the speaker most likely said.
+- Keep the speaker's own wording and language: do not paraphrase, shorten, summarize, translate or censor.
+- Keep each cue's words in that cue; do not move words between cues.
+- If a cue is already correct, return it unchanged. No line breaks, no notes or comments."""
+
+
+def correct(cues, lang, engine, context, log, keys, settings=None, progress=lambda v: None):
+    """Poprawia tekst transkrypcji przez LLM (przesłyszenia, nazwy, interpunkcja). Czasy zostają bez zmian.
+    Poprawka, która za bardzo odbiega od oryginału (model przepisał zdanie zamiast je poprawić), jest odrzucana."""
+    import difflib
+
+    if engine == "deepl":
+        raise RuntimeError(t("correct_deepl"))
+    log(t("correcting", engine=ENGINES[engine], n=len(cues)))
+    ask, chunk = _llm(engine, keys, settings)
+    system = SYSTEM_CORRECT.format(lang=_llm_lang(lang))
+    fixed = _llm_cues(cues, system, context, log, ask, chunk, progress, task="correct")
+    changed = 0
+    for old, new in zip(cues, fixed):
+        if new.text == old.text:
+            continue
+        if difflib.SequenceMatcher(None, old.text.lower(), new.text.lower()).ratio() < 0.5:
+            new.text = old.text
+        else:
+            changed += 1
+    log(t("corrected", n=changed, total=len(cues)))
+    return fixed
+
+
+def _llm(engine, keys, settings=None):
+    """(ask(system, user) → lista {id, text}, wielkość partii) dla tłumacza LLM."""
+    chunk = 80
     if engine == "api":
         import anthropic
 
@@ -649,7 +830,7 @@ def translate(cues, src, tgt, engine, context, log, keys, settings=None, progres
     else:
         exe = find_claude()
         ask = lambda system, user: _ask_cli(exe, system, user)
-    return _translate_llm(cues, src, tgt, context, log, ask, chunk, progress)
+    return ask, chunk
 
 
 def check_engine(engine, keys, settings=None):
@@ -716,8 +897,10 @@ def _ask_openai(client, model, system, user):
     return _json_payload(resp.choices[0].message.content or "")["translations"]
 
 
-def _translate_llm(cues, src, tgt, context, log, ask, chunk=80, progress=lambda v: None):
-    system = SYSTEM.format(src=_llm_lang(src), tgt=_llm_lang(tgt))
+def _llm_cues(cues, system, context, log, ask, chunk=80, progress=lambda v: None, task="translate"):
+    """Napisy partiami do LLM (z kilkoma poprzednimi wynikami jako kontekst); brakujące id — jedna powtórka.
+    task: "translate" albo "correct" — tylko opis zadania w poleceniu i komunikat o brakach."""
+    done_word = "translated" if task == "translate" else "corrected"
     out = [Cue(c.start, c.end, c.text) for c in cues]
 
     for start in range(0, len(cues), chunk):
@@ -731,11 +914,11 @@ def _translate_llm(cues, src, tgt, context, log, ask, chunk=80, progress=lambda 
         if context.strip():
             intro += f"Context about this video (topic, names, glossary):\n{context.strip()}\n\n"
         if prev:
-            intro += f"Previous cues, already translated (for context only):\n{json.dumps(prev, ensure_ascii=False)}\n\n"
+            intro += f"Previous cues, already {done_word} (for context only):\n{json.dumps(prev, ensure_ascii=False)}\n\n"
 
         missing = dict(batch)
         for attempt in range(2):
-            user = intro + "Cues to translate:\n" + json.dumps(
+            user = intro + f"Cues to {task}:\n" + json.dumps(
                 [{"id": i, "text": t} for i, t in missing.items()], ensure_ascii=False)
             try:
                 items = list(ask(system, user))
@@ -743,20 +926,21 @@ def _translate_llm(cues, src, tgt, context, log, ask, chunk=80, progress=lambda 
                 raise RuntimeError(t("bad_response", err=type(e).__name__)) from e
             for item in items:
                 tid, text = (item.get("id"), item.get("text")) if isinstance(item, dict) else (None, None)
-                if tid in missing and isinstance(text, str) and text.strip():  # pusty tekst = brak tłumaczenia
+                if tid in missing and isinstance(text, str) and text.strip():  # pusty tekst = brak odpowiedzi
                     out[tid].text = text
                     del missing[tid]
             if not missing:
                 break
-            log(t("retry_missing", n=len(missing)))
+            if attempt == 0:
+                log(t("retry_missing", n=len(missing)))
         if missing:
-            log(t("untranslated", n=len(missing)))
+            log(t("untranslated" if task == "translate" else "uncorrected", n=len(missing)))
     return out
 
 
 def _ask_cli(exe, system, user):
     proc = _run_proc(
-        [exe, "-p", "Translate the subtitle cues given on stdin, following the system prompt.",
+        [exe, "-p", "Process the subtitle cues given on stdin, following the system prompt.",
          "--output-format", "json", "--json-schema", json.dumps(SCHEMA),
          "--system-prompt", system, "--tools", "",
          # bez serwerów MCP, wtyczek i zapisu sesji użytkownika: start CLI ~2 s szybciej
@@ -915,6 +1099,8 @@ def stt_info(model_name):
 # SUBTITLE_GENERATOR_CONFIG: inny plik ustawień (np. do testów)
 CONFIG = os.environ.get("SUBTITLE_GENERATOR_CONFIG") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 WHISPER_MODELS = ["large-v3", "large-v3-turbo", "medium"]
+WHISPER_SIZES = {"large-v3": 3.09, "large-v3-turbo": 1.62, "medium": 1.53}  # GB do pobrania
+WHISPER_RECOMMENDED = "large-v3-turbo"  # o połowę mniejszy i kilka razy szybszy, prawie tak dokładny
 MEDIA_EXT = (".mp4", ".mov", ".mxf", ".mkv", ".avi", ".m4v", ".webm", ".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg")
 
 
@@ -1000,13 +1186,16 @@ class Options:
     context: str = ""
     chars: int = 42
     lines: int = 2
+    fmt: str = "srt"                      # klucz z FORMATS
     out_dir: str | None = None            # None = obok pliku źródłowego
     keys: dict | None = None
     settings: dict | None = None          # modele / adresy silników LLM (openai_model, custom_url…)
     on_exists: object = None              # plik wynikowy istnieje: f(path) → 'overwrite' | 'copy' | 'skip'
+    correct: bool = False                 # poprawka transkrypcji przez LLM (silnik = engine)
 
 
-STT_WEIGHT, TRANSLATE_WEIGHT = 1.0, 0.4  # względny czas etapów (rozpoznawanie mowy vs jedno tłumaczenie)
+# względny czas etapów: rozpoznawanie mowy, poprawka transkrypcji, jedno tłumaczenie
+STT_WEIGHT, CORRECT_WEIGHT, TRANSLATE_WEIGHT = 1.0, 0.3, 0.4
 
 
 def _norm(path):
@@ -1048,7 +1237,7 @@ MAX_PARALLEL = 4
 def _names(path, o, src=None):
     folder = o.out_dir or os.path.dirname(os.path.abspath(path))
     name = os.path.splitext(os.path.basename(path))[0]
-    if src and path.lower().endswith(".srt") and name.lower().endswith("." + src):  # film.pl.srt → film
+    if src and is_subtitle(path) and name.lower().endswith("." + src):  # film.pl.srt → film
         name = name[: -len(src) - 1]
     return folder, name
 
@@ -1069,18 +1258,18 @@ def plan_outputs(path, o, log, progress=lambda v, stage=None: None, reserved=Non
 
     Zwraca {"src": język źródła lub None, "out": {język: ścieżka zapisu lub None = pomiń}}.
     Przy automatycznym wykrywaniu język mowy ustalamy tylko wtedy, gdy obok leży już jakiś plik napisów."""
-    media = not path.lower().endswith(".srt")
+    media = not is_subtitle(path)
     src = o.language
     if not media and not src:
         raise RuntimeError(t("srt_needs_lang"))  # zgłaszamy od razu, przed pytaniami o inne pliki
     folder, name = _names(path, o, src)
-    if media and not src and any(os.path.exists(os.path.join(folder, f"{name}.{c}.srt")) for c in LANGUAGES):
+    if media and not src and any(os.path.exists(os.path.join(folder, f"{name}.{c}.{o.fmt}")) for c in LANGUAGES):
         src = detect_language(path, o.model, log, progress)
     langs = ([src] if media and src else []) + unique_targets(o.targets, src)
     out = {}
     for lang in langs:
         check_cancel()
-        target = os.path.join(folder, f"{name}.{file_suffix(lang)}.srt")
+        target = os.path.join(folder, f"{name}.{file_suffix(lang)}.{o.fmt}")
         out[lang] = output_path(target, o.on_exists, reserved)
         if out[lang] is None:
             log(t("skipped_existing", path=target))
@@ -1088,14 +1277,14 @@ def plan_outputs(path, o, log, progress=lambda v, stage=None: None, reserved=Non
 
 
 def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda path: None, plan=None):
-    """Wideo/audio → SRT (+ tłumaczenia). Plik .srt → tylko tłumaczenia. Zwraca listę zapisanych plików.
+    """Wideo/audio → napisy (+ tłumaczenia). Plik napisów → tylko tłumaczenia. Zwraca listę zapisanych plików.
 
     progress(v, stage): v = postęp całego pliku 0–1 (None = etap bez procentów), stage = opis etapu."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    media = not path.lower().endswith(".srt")
+    media = not is_subtitle(path)
     n_tr = len(unique_targets(o.targets, o.language))
-    total = (STT_WEIGHT if media else 0) + TRANSLATE_WEIGHT * n_tr or 1
+    total = (STT_WEIGHT + (CORRECT_WEIGHT if o.correct else 0) if media else 0) + TRANSLATE_WEIGHT * n_tr or 1
     offset = 0.0
     if o.out_dir:
         os.makedirs(o.out_dir, exist_ok=True)  # brak folderu zgłosilibyśmy dopiero po transkrypcji
@@ -1131,21 +1320,21 @@ def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda
         out = target_path if resolved else resolve(target_path)
         if out is None:
             return
-        write_srt(cues, out, o.chars, lang, o.lines)
+        write_subs(cues, out, o.chars, lang, o.lines)
         written.append(out)
         saved(out)
         log(message(out))
 
-    if path.lower().endswith(".srt"):
+    if not media:
         src = o.language
         if not src:
             raise RuntimeError(t("srt_needs_lang"))
-        cues = read_srt(path)
+        cues = read_subs(path)
         log(t("loaded_srt", n=len(cues)))
-    elif o.language in decided and decided[o.language] is None and \
-            os.path.exists(existing := os.path.join(folder, f"{name}.{o.language}.srt")):
+    elif o.language in decided and decided[o.language] is None and o.fmt != "txt" and \
+            os.path.exists(existing := os.path.join(folder, f"{name}.{o.language}.{o.fmt}")):
         # transkrypcja już jest i ma zostać — tłumaczymy ją zamiast rozpoznawać mowę od nowa
-        src, cues = o.language, read_srt(existing)
+        src, cues = o.language, read_subs(existing)
         log(t("using_existing", path=existing))
         offset += STT_WEIGHT
     else:
@@ -1155,14 +1344,24 @@ def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda
             log(t("no_speech"))
             return written
         cues = build_cues(words, o.chars, o.lines, lang=src)
-        out = resolve(os.path.join(folder, f"{name}.{src}.srt"), src)
+        out = resolve(os.path.join(folder, f"{name}.{src}.{o.fmt}"), src)
+        if o.correct and (out or unique_targets(o.targets, src)):  # poprawka przyda się zapisowi lub tłumaczeniom
+            check_cancel()
+            try:
+                cues = correct(cues, src, o.engine, o.context, log, keys, o.settings,
+                               stage(CORRECT_WEIGHT, t("stage_correct")))
+            except Cancelled:
+                raise
+            except Exception as e:  # bez poprawki napisy i tak powstaną — z tekstu Whispera
+                log(t("correct_failed", err=e))
+            offset += CORRECT_WEIGHT
         save(cues, out, lambda out: t("saved_n", path=out, n=len(cues)), src, resolved=True)
 
     # o istniejące pliki tłumaczeń pytamy przed tłumaczeniem — pominięte języki nie są tłumaczone
     plan = {}
     for tgt in unique_targets(o.targets, src):
         check_cancel()
-        out = resolve(os.path.join(folder, f"{name}.{file_suffix(tgt)}.srt"), tgt)
+        out = resolve(os.path.join(folder, f"{name}.{file_suffix(tgt)}.{o.fmt}"), tgt)
         if out:
             plan[tgt] = out
     targets = list(plan)

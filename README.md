@@ -2,7 +2,7 @@
 
 **English** · [Polski](README.pl.md)
 
-Turn video or audio into ready-to-use `.srt` subtitles and translate them into other languages.
+Turn video or audio into ready-to-use subtitles (`.srt`, `.vtt`, `.ass`, or plain-text `.txt`) and translate them into other languages.
 The files work in Premiere Pro, DaVinci Resolve, Final Cut Pro, YouTube and other tools that accept SRT.
 
 - **Speech recognition:** Whisper large-v3 ([faster-whisper](https://github.com/SYSTRAN/faster-whisper)), running locally. Uses an NVIDIA GPU (CUDA) on Windows and Linux, and the CPU on macOS.
@@ -64,7 +64,7 @@ The command-line package doesn't need tkinter, which makes it a good fit for ser
    ```
 4. Start **Subtitle Generator** from the application menu (setup adds the entry), or run `./generator.sh`.
 
-The Whisper model (about 3 GB for large-v3) downloads on the first transcription.
+Download a Whisper model in the app, in the **Speech recognition** section: `large-v3-turbo` (1.6 GB, recommended), `large-v3` (3.1 GB, most accurate) or `medium` (1.5 GB). A download can be cancelled and the next one resumes it. Until a model is downloaded, the model selector is disabled and video/audio files are skipped. Translating existing subtitle files works without a model. The command-line version downloads the chosen model on the first transcription.
 
 ## Translator setup
 
@@ -84,11 +84,15 @@ Keys you enter in the app are stored in the system keychain: Credential Manager 
 
 ### GUI
 
-1. **Add files**: drag them onto the window or use **Add files…**. You can add video, audio, or an existing `.srt` file (translated without transcription). Dragging a folder adds all supported files in it. Hover over a file name to see its full path.
-2. Choose the **spoken language** (auto-detect by default) and the **model**. `large-v3` is the most accurate; `large-v3-turbo` is several times faster. If the selected language clearly doesn't match the recording, the detected language is used and the log says so.
+The app starts in the system language (Polish or English; English for any other system language). The **PL / EN** switch in the top-right corner changes it, and the choice is remembered.
+
+1. **Add files**: drag them onto the window or use **Add files…**. You can add video, audio, or existing `.srt` / `.vtt` / `.ass` subtitles (translated without transcription). Dragging a folder adds all supported files in it. Hover over a file name to see its full path.
+2. Choose the **spoken language** (auto-detect by default) and the **model**. `large-v3` is the most accurate; `large-v3-turbo` is several times faster. If the selected model isn't downloaded, a **Download** button appears below. If the selected language clearly doesn't match the recording, the detected language is used and the log says so.
+   **Proofread with an LLM**: after speech recognition, the translator chosen in the Translation section fixes misheard words, proper names and punctuation, helped by the **Context** field (e.g. people's names or equipment). Timing stays the same, and translations are made from the corrected text. A correction that strays too far from the original (the model rewrote the sentence instead of fixing it) is rejected. If proofreading fails, the Whisper text is saved. Not available with DeepL.
 3. Optionally pick **target languages** and a translator. For API translators, the model list fills in from your account once the key is entered. Use **Other languages** for anything not in the list (LLM translators only).
-4. Optionally add **context**: topic, proper names, a glossary, or a rule such as *keep the brand name untranslated*.
-5. Click **Generate subtitles** (it turns into **Stop** while working). Files are saved next to the source as `name.pl.srt`, `name.en.srt`, and so on. **Open folder** shows the results.
+4. Under **Subtitle format**, pick the file type: **SRT** (most widely supported), **WebVTT** (web, HTML5 players), **ASS** (Aegisub, VLC, mpv — styled as white text with an outline) or **TXT** (text only, no timing — e.g. an interview transcript).
+5. Optionally add **context**: topic, proper names, a glossary, or a rule such as *keep the brand name untranslated*.
+6. Click **Generate subtitles** (it turns into **Stop** while working). Files are saved next to the source as `name.pl.srt`, `name.en.srt`, and so on (the extension follows the chosen file type). **Open folder** shows the results. The **Log** shows progress for each file separately: saved files (✓), warnings (!) and errors (✕).
 
 ### Command line
 
@@ -106,9 +110,11 @@ generator-cli.bat video.mp4 -l en -t pl,de          # Windows
 | `-m large-v3-turbo` | Whisper model: `large-v3`, `large-v3-turbo`, `medium` |
 | `-c "…"` | context for the translator |
 | `-o folder` | output folder (default: next to the source file) |
+| `-f vtt` | file type: `srt` (default), `vtt`, `ass`, `txt` |
+| `--correct` | proofread the transcript with the `-e` LLM translator (not DeepL) |
 | `--chars 42 --lines 2` | subtitle layout |
 | `--overwrite` | overwrite existing subtitle files (by default a copy such as `video.en (2).srt` is saved) |
-| `--ui-lang en` | message language (`en` or `pl`) |
+| `--ui-lang en` | message language (`en` or `pl`); defaults to the system language, English for anything other than Polish |
 
 ### Recommended workflow for editing
 
@@ -118,6 +124,16 @@ generator-cli.bat video.mp4 -l en -t pl,de          # Windows
 4. Add the corrected `.srt` to the app and translate it. Translations then start from the corrected text.
 
 In Premiere Pro: **File → Import**, select the `.srt` and drag it onto the timeline.
+
+### Encoding and line endings
+
+Subtitle files are saved as **UTF-8** (without a BOM). Every current tool reads it: Premiere Pro, DaVinci Resolve, Final Cut Pro, YouTube, VLC. It also covers every supported language, including Chinese, Arabic and Greek.
+
+Line endings depend on the system: `CRLF` on Windows, `LF` on macOS and Linux. All of the tools above handle both.
+
+There is no option to change the encoding. If an old device (e.g. a TV or a DVD player reading from USB) shows garbled characters, convert the file with Notepad++ or Subtitle Edit (e.g. to Windows-1250 for Central European languages).
+
+Files loaded for translation can be UTF-8, UTF-16 or Windows-1250/1252 — the encoding is detected automatically.
 
 ## Troubleshooting
 

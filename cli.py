@@ -7,7 +7,8 @@ import i18n
 from i18n import t
 
 i18n.S.update({
-    "cli_desc": ("Wideo/audio → napisy SRT (+ tłumaczenia).", "Video/audio → SRT subtitles (+ translations)."),
+    "cli_desc": ("Wideo/audio → napisy SRT / WebVTT / ASS / TXT (+ tłumaczenia).",
+                 "Video/audio → SRT / WebVTT / ASS / TXT subtitles (+ translations)."),
     "cli_examples": (
         "Przykłady:\n"
         "  generator-cli film.mp4                                  napisy w języku mowy (wykrywany)\n"
@@ -17,7 +18,7 @@ i18n.S.update({
         "  generator-cli video.mp4                                 subtitles in the spoken language (detected)\n"
         "  generator-cli video.mp4 -l en -t pl,de                  EN + PL and DE translations\n"
         "  generator-cli video.en.srt -l en -t french -e deepl     translate an existing SRT only"),
-    "a_files": ("pliki wideo/audio lub .srt", "video/audio or .srt files"),
+    "a_files": ("pliki wideo/audio lub napisy .srt/.vtt/.ass", "video/audio or .srt/.vtt/.ass subtitle files"),
     "a_lang": ("język mowy / napisów (kod lub nazwa), domyślnie auto",
                "spoken / subtitle language (code or name), default: auto"),
     "a_translate": ("języki docelowe po przecinku, np. en,de,kataloński",
@@ -29,6 +30,9 @@ i18n.S.update({
     "a_model": ("model Whisper", "Whisper model"),
     "a_context": ("kontekst dla tłumacza (temat, nazwy, słownik)", "context for the translator (topic, names, glossary)"),
     "a_out": ("folder wyjściowy (domyślnie obok pliku)", "output folder (default: next to the source file)"),
+    "a_format": ("format zapisu (srt)", "output format (srt)"),
+    "a_correct": ("popraw transkrypcję tłumaczem LLM z -e (przesłyszenia, nazwy, interpunkcja)",
+                  "proofread the transcript with the -e LLM translator (misheard words, names, punctuation)"),
     "a_chars": ("maks. znaków w linii (42)", "max characters per line (42)"),
     "a_lines": ("maks. linii w napisie (2)", "max lines per subtitle (2)"),
     "a_overwrite": ("nadpisuj istniejące pliki (domyślnie: zapis jako kopia, np. film.en (2).srt)",
@@ -58,6 +62,8 @@ def main():
     p.add_argument("--llm-url", help=t("a_llm_url"))
     p.add_argument("-c", "--context", default="", help=t("a_context"))
     p.add_argument("-o", "--out-dir", help=t("a_out"))
+    p.add_argument("-f", "--format", choices=list(core.FORMATS), default="srt", help=t("a_format"))
+    p.add_argument("--correct", action="store_true", help=t("a_correct"))
     p.add_argument("--chars", type=int, default=42, help=t("a_chars"))
     p.add_argument("--lines", type=int, default=2, help=t("a_lines"))
     p.add_argument("--overwrite", action="store_true", help=t("a_overwrite"))
@@ -82,10 +88,14 @@ def main():
     if a.llm_url:
         settings[f"{engine}_url"] = a.llm_url
     opts = core.Options(language=lang, model=a.model, targets=targets, engine=engine, context=a.context,
-                        chars=a.chars, lines=a.lines, out_dir=a.out_dir, keys=core.api_keys(cfg),
-                        settings=settings, on_exists=(lambda p: "overwrite") if a.overwrite else None)
+                        chars=a.chars, lines=a.lines, fmt=a.format, out_dir=a.out_dir, keys=core.api_keys(cfg),
+                        settings=settings, on_exists=(lambda p: "overwrite") if a.overwrite else None,
+                        correct=a.correct)
 
-    if targets:
+    if a.correct and engine == "deepl":
+        print(t("error", err=t("correct_deepl")), file=sys.stderr)
+        return 1
+    if targets or a.correct:
         try:  # niedostępny tłumacz zgłaszamy przed transkrypcją
             core.check_engine(opts.engine, opts.keys, settings)
         except RuntimeError as e:

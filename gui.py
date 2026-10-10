@@ -2,6 +2,7 @@
 import os
 import queue
 import threading
+import time
 import tkinter as tk
 import traceback
 from tkinter import filedialog
@@ -36,6 +37,8 @@ CHECK_BORDER = ("#C3C8D0", "#4A505A")
 DANGER_BG = ("#FBEAEA", "#3A2426")
 DANGER_HOVER = ("#F6DCDC", "#45292B")
 DANGER_TEXT = ("#B42323", "#F3A6A3")
+SUCCESS = ("#1A7F37", "#4AC26B")
+WARNING = ("#9A6700", "#D29922")
 
 
 def apply_theme(root):
@@ -81,7 +84,23 @@ def font(size=13, weight="normal"):
 
 
 UI_LANGS = {"PL": "pl", "EN": "en"}
+
+# klucz komunikatu → (styl, ikona) we wpisie logu; pozostałe — zwykły tekst
+LOG_STYLE = {
+    "saved": ("ok", "✓"), "saved_n": ("ok", "✓"),
+    "error": ("error", "✕"),
+    "lang_mismatch": ("warn", "!"), "untranslated": ("warn", "!"), "uncorrected": ("warn", "!"),
+    "correct_failed": ("warn", "!"), "gpu_failed": ("warn", "!"),
+    "unsupported": ("warn", "!"), "skipped_existing": ("detail", "–"),
+    "chunk": ("detail", ""), "retry_missing": ("detail", ""),
+    "model_downloaded": ("ok", "✓"), "no_model_skip": ("warn", "!"), "download_cancelled": ("detail", "–"),
+    "done": ("done", "✓"), "done_with_errors": ("done_warn", "!"), "cancelled": ("done_muted", "■"),
+}
+LOG_SHORT_PATH = ("saved", "saved_n", "skipped_existing", "using_existing")
+LOG_END = ("done", "done_with_errors", "cancelled")  # podsumowanie zadania — poza blokiem pliku
 LABEL_COL = 140  # szerokość kolumny etykiet w karcie tłumaczenia
+LOG_MIN_W = 320  # minimalna szerokość kolumny logu
+LOG_EXTRA_W = 60  # o tyle szerszy log przy starcie (resztę daje poszerzenie okna)
 
 
 def mode_color(pair):
@@ -110,7 +129,7 @@ class CheckGrid(tk.Canvas):
         sc, self.mode = self.scale, ctk.get_appearance_mode()
         self.delete("all")
         self.configure(bg=mode_color(INSET))
-        box, gap, pad_x, row_h = round(18 * sc), round(9 * sc), round(12 * sc), round(26 * sc)
+        box, gap, pad_x, row_h = round(18 * sc), round(9 * sc), round(12 * sc), round(24 * sc)
         col_w = max(self.font.measure(text) for _, text in self.items) + box + gap + pad_x
         rows = -(-len(self.items) // self.columns)
         top = round(8 * sc)
@@ -237,8 +256,6 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         super().__init__()
         self._set_icon()
         apply_theme(self)
-        self.geometry("1120x880")
-        self.minsize(980, 800)
         self.q = queue.Queue()
         self.cfg = core.load_config()
         i18n.set_lang(self.cfg.get("ui_lang"))
@@ -246,26 +263,32 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         self.paths = []
         self.running = False
         self.outputs = []  # pliki zapisane w ostatnim uruchomieniu
+        self.log_entries = []  # wpisy logu (do odtworzenia po zmianie języka interfejsu)
+        self.downloading, self.dl_progress = None, (0, 0)  # pobierany model Whisper i postęp (bajty)
         self.engine_code = self.cfg.get("engine", "cli")
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
         self.dnd = self._enable_drop()
         self.build()
+        # szerokość: dodatkowe miejsce dostaje log (3. kolumna); wysokość: tyle, ile potrzebują ustawienia
+        self._fit_window(initial=True)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(100, self.poll)
 
     # ------------------------------------------------------------ budowa okna
 
-    def build(self, log_text=""):
+    def build(self):
         self.title(t("title"))
         self.body = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
         self.body.grid(row=0, column=0, sticky="nsew")
         b = self.body
-        b.grid_columnconfigure((0, 1), weight=1, uniform="col")
+        # kolumny ustawień: równe, szerokie na swoją zawartość; log (kolumna 2) dostaje resztę szerokości okna
+        b.grid_columnconfigure((0, 1), weight=0, uniform="col")
+        b.grid_columnconfigure(2, weight=1, minsize=round(LOG_MIN_W * ctk.ScalingTracker.get_widget_scaling(self)))
         b.grid_rowconfigure(1, weight=1)
 
         head = ctk.CTkFrame(b, fg_color="transparent")
-        head.grid(row=0, column=0, columnspan=2, sticky="ew", padx=24, pady=(18, 12))
+        head.grid(row=0, column=0, columnspan=3, sticky="ew", padx=24, pady=(18, 12))
         ctk.CTkLabel(head, text=t("title"), font=font(22, "bold")).pack(side="left")
         lang = ctk.CTkSegmentedButton(head, values=list(UI_LANGS), command=self.on_ui_lang, width=90)
         lang.set(i18n.LANG.upper())
@@ -274,24 +297,20 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         left = ctk.CTkFrame(b, fg_color="transparent")
         left.grid(row=1, column=0, sticky="nsew", padx=(24, 8))
         right = ctk.CTkFrame(b, fg_color="transparent")
-        right.grid(row=1, column=1, sticky="nsew", padx=(8, 24))
+        right.grid(row=1, column=1, sticky="nsew", padx=8)
         left.grid_columnconfigure(0, weight=1)
+        left.grid_rowconfigure(3, weight=1)  # gdy prawa kolumna jest wyższa — puste miejsce pod kartami
         right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(0, weight=1)
+        right.grid_rowconfigure(0, weight=1)  # gdy lewa jest wyższa — karta tłumaczenia się wyrównuje
 
         self._files_card(left).grid(row=0, column=0, sticky="ew")
         self._stt_card(left).grid(row=1, column=0, sticky="ew", pady=12)
         self._format_card(left).grid(row=2, column=0, sticky="ew")
-        self.log_box = ctk.CTkTextbox(left, height=90, corner_radius=12,
-                                      font=ctk.CTkFont(family=mono_family(), size=12))
-        self.log_box.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
-        self.log_box.insert("end", log_text)
-        self.log_box.configure(state="disabled")
-        left.grid_rowconfigure(3, weight=1, minsize=round(80 * ctk.ScalingTracker.get_widget_scaling(self)))
         self._translate_card(right).grid(row=0, column=0, sticky="nsew")
+        self._log_card(b).grid(row=1, column=2, sticky="nsew", padx=(8, 24))
 
         bottom = ctk.CTkFrame(b, fg_color="transparent")
-        bottom.grid(row=2, column=0, columnspan=2, sticky="ew", padx=24, pady=(14, 18))
+        bottom.grid(row=2, column=0, columnspan=3, sticky="ew", padx=24, pady=(14, 18))
         bottom.grid_columnconfigure(0, weight=1)
         self.go = ctk.CTkButton(bottom, text="", height=42, font=font(15, "bold"), command=self.on_go)
         self.go.grid(row=0, column=0, sticky="ew")
@@ -311,17 +330,58 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         self._render_files()
         self.refresh_info()
 
+    def _fit_window(self, initial=False):
+        """Okno nie niższe niż ustawienia (np. po wyborze tłumacza z trzema polami albo z panelem pobierania
+        modelu) — nic się nie ucina. Na starcie dokładnie tak wysokie, więc pole kontekstu nie puchnie,
+        a log trochę szerszy od minimum (LOG_EXTRA_W); szersze okno — szerszy log."""
+        self.update_idletasks()
+        sc = ctk.ScalingTracker.get_window_scaling(self)
+        need_w, need_h = round(self.body.winfo_reqwidth() / sc), round(self.body.winfo_reqheight() / sc)
+        self._fitted_req = self.body.winfo_reqheight()
+        self.minsize(need_w, need_h)
+        if initial:  # Tk podaje szerokość ekranu już w skali okna
+            w, h = max(need_w, min(need_w + LOG_EXTRA_W, self.winfo_screenwidth() - 80)), need_h
+        else:
+            # z geometrii okna, nie winfo_width: przed pokazaniem okna winfo_width zwraca 1
+            cur_w, cur_h = (int(v) for v in self.geometry().split("+")[0].split("x"))
+            w, h = max(cur_w, need_w), max(cur_h, need_h)
+            if (w, h) == (cur_w, cur_h):
+                return
+        self.geometry(f"{w}x{h}")
+
     def _set_icon(self):
         assets = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
         try:
             if os.name == "nt":
                 # CustomTkinter ustawia własną ikonę ~200 ms po starcie — nadpisujemy ją później
-                self.after(300, lambda: self.iconbitmap(os.path.join(assets, "icon.ico")))
+                ico = os.path.join(assets, "icon.ico")
+                self.after(300, lambda: (self.iconbitmap(ico), self._win_icons(ico)))
             else:
                 self._icon = tk.PhotoImage(file=os.path.join(assets, "icon.png"))
                 self.iconphoto(True, self._icon)
         except (tk.TclError, OSError):
             pass  # brak pliku ikony nie może zablokować programu
+
+    def _win_icons(self, path):
+        """Tk daje Windows jedną ikonę w oba miejsca (pasek tytułu i zadań), przeskalowaną z innej klatki —
+        przy skalowaniu ekranu np. 175% wychodzi rozmyta. Tu: klatki z .ico w dokładnie potrzebnych rozmiarach."""
+        import ctypes
+
+        try:
+            u = ctypes.windll.user32
+            u.LoadImageW.restype = ctypes.c_void_p
+            u.LoadImageW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint, ctypes.c_int, ctypes.c_int,
+                                     ctypes.c_uint]
+            u.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p]
+            hwnd = u.GetParent(self.winfo_id())
+            dpi = u.GetDpiForWindow(hwnd)
+            for which, metric in ((1, 11), (0, 49)):  # ICON_BIG ↔ SM_CXICON, ICON_SMALL ↔ SM_CXSMICON
+                size = u.GetSystemMetricsForDpi(metric, dpi)
+                icon = u.LoadImageW(None, path, 1, size, size, 0x10)  # IMAGE_ICON, LR_LOADFROMFILE
+                if icon:
+                    u.SendMessageW(hwnd, 0x80, which, icon)  # WM_SETICON
+        except (AttributeError, OSError):
+            pass  # Windows starszy niż 10 (brak funkcji DPI) — zostaje ikona od Tk
 
     def _enable_drop(self):
         """Pliki (i foldery) upuszczone gdziekolwiek na okno trafiają na listę."""
@@ -347,7 +407,7 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
 
     def add_paths(self, paths):
         """Dodaje pliki; z folderu — wszystkie obsługiwane pliki w nim (bez podfolderów)."""
-        supported = core.MEDIA_EXT + (".srt",)
+        supported = core.MEDIA_EXT + core.SUB_EXT
         for p in paths:
             items = sorted(os.path.join(p, f) for f in os.listdir(p)) if os.path.isdir(p) else [p]
             for f in items:
@@ -364,9 +424,8 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         self.cfg["ui_lang"] = UI_LANGS[label]
         core.save_config(self.cfg)
         i18n.set_lang(self.cfg["ui_lang"])
-        log_text = self.log_box.get("1.0", "end-1c")
         self.body.destroy()
-        self.build(log_text)
+        self.build()
         prompt = getattr(self, "prompt", None)
         if prompt is not None and prompt.winfo_exists():
             prompt.lift()  # nowe okno główne przykryłoby otwarte pytanie
@@ -399,19 +458,141 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         self.speech.set(core.lang_name(code) if code in core.LANGUAGES else t("auto"))
         self.speech.grid(row=1, column=1, sticky="w", padx=10, pady=5)
         ctk.CTkLabel(c, text=t("model")).grid(row=2, column=0, sticky="w", padx=18, pady=5)
-        self.model = ctk.CTkSegmentedButton(c, values=core.WHISPER_MODELS,
-                                            command=lambda _: (self.refresh_info(), self._autosave()))
-        self.model.set(self.cfg.get("model", "large-v3"))
+        self.model = ctk.CTkSegmentedButton(c, values=core.WHISPER_MODELS, command=self.on_model)
+        saved = self.cfg.get("model", "large-v3")
+        cached = [m for m in core.WHISPER_MODELS if core.model_cached(m)]
+        self.model.set(saved if saved in cached or not cached else cached[0])  # pobrany zamiast niepobranego
         self.model.grid(row=2, column=1, sticky="w", padx=10, pady=5)
+        # poprawka transkrypcji przez LLM — silnikiem z sekcji Tłumaczenie
+        row = ctk.CTkFrame(c, fg_color="transparent")
+        row.grid(row=3, column=1, columnspan=2, sticky="w", padx=10, pady=(4, 0))
+        self.correct_var = tk.BooleanVar(value=bool(self.cfg.get("correct", False)))
+        self.correct = ctk.CTkCheckBox(row, text=t("correct_box"), variable=self.correct_var, command=self._autosave,
+                                       checkbox_width=18, checkbox_height=18)
+        self.correct.pack(side="left")
+        Tooltip(self.correct, t("correct_tip"))
+        self.correct_note = ctk.CTkLabel(row, text=t("correct_needs_llm"), text_color=MUTED, font=font(12))
         self.stt_info = ctk.CTkLabel(c, text="", text_color=MUTED, font=font(12), justify="left", wraplength=440)
-        self.stt_info.grid(row=3, column=0, columnspan=3, sticky="w", padx=18, pady=(4, 16))
+        self.stt_info.grid(row=4, column=0, columnspan=3, sticky="w", padx=18, pady=(4, 16))
+
+        # panel pobierania: gdy wybrany model nie jest pobrany (albo żaden) — opis, wybór modelu, postęp
+        p = self.dl_panel = ctk.CTkFrame(c, fg_color=INSET, corner_radius=8)
+        p.grid(row=5, column=0, columnspan=3, sticky="ew", padx=18, pady=(0, 16))
+        p.grid_columnconfigure(0, weight=1)
+        self.dl_text = ctk.CTkLabel(p, text="", justify="left", anchor="w", wraplength=400, font=font(12))
+        self.dl_text.grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 6))
+        self.dl_choice = ctk.CTkOptionMenu(p, values=[""], dynamic_resizing=False, font=font(12))
+        self.dl_btn = ctk.CTkButton(p, text=t("download"), width=100, command=self.download_model)
+        self.dl_bar = ctk.CTkProgressBar(p, height=8)
+        self.dl_stop = self._secondary(p, t("cancel"), self.cancel_download, width=100)
+        self._update_model_state()
         return c
 
+    @staticmethod
+    def _gb(value):
+        text = f"{value:.1f}"
+        return text.replace(".", ",") if i18n.LANG == "pl" else text
+
+    def on_model(self, _=None):
+        self.refresh_info()
+        self._autosave()
+        self._update_model_state()
+
+    def _update_model_state(self):
+        """Bez pobranego modelu wybór modelu jest wyłączony (tłumaczenie plików napisów działa dalej).
+        Gdy wybrany model nie jest pobrany — panel z opisem i przyciskiem Pobierz; w trakcie pobierania — postęp."""
+        cached = [m for m in core.WHISPER_MODELS if core.model_cached(m)]
+        selected = self.model.get()
+        self.model.configure(state="normal" if cached else "disabled")
+        self._update_correct_state()
+        if cached:
+            self.stt_info.grid()
+        else:
+            self.stt_info.grid_remove()  # „Whisper large-v3 · GPU” bez modelu tylko by mylił
+        if self.downloading:
+            for w in (self.dl_choice, self.dl_btn):
+                w.grid_remove()
+            self.dl_bar.grid(row=1, column=0, sticky="ew", padx=(12, 12), pady=(0, 12))
+            self.dl_stop.configure(state="normal")
+            self.dl_stop.grid(row=1, column=1, sticky="e", padx=(0, 12), pady=(0, 12))
+            self._show_download_progress()
+        elif selected in cached:
+            self.dl_panel.grid_remove()
+            return
+        else:
+            missing = [m for m in core.WHISPER_MODELS if m not in cached]
+            self.dl_labels = {t("model_option", model=m, gb=self._gb(core.WHISPER_SIZES[m]), note=t("note_" + m)): m
+                              for m in missing}
+            default = selected if cached else core.WHISPER_RECOMMENDED
+            self.dl_choice.configure(values=list(self.dl_labels))
+            self.dl_choice.set(next(label for label, m in self.dl_labels.items() if m == default))
+            self.dl_text.configure(text=t("model_missing", model=selected) if cached else t("no_model"))
+            for w in (self.dl_bar, self.dl_stop):
+                w.grid_remove()
+            self.dl_choice.grid(row=1, column=0, sticky="ew", padx=(12, 8), pady=(0, 12))
+            self.dl_btn.grid(row=1, column=1, sticky="e", padx=(0, 12), pady=(0, 12))
+        self.dl_panel.grid()
+
+    def _update_correct_state(self):
+        """Poprawka transkrypcji: aktywna, gdy jest pobrany model Whisper i tłumacz to LLM (DeepL nie poprawia)."""
+        deepl = self.engine_code == "deepl"
+        has_model = any(core.model_cached(m) for m in core.WHISPER_MODELS)
+        self.correct.configure(state="normal" if has_model and not deepl else "disabled")
+        if deepl:
+            self.correct_note.pack(side="left", padx=(8, 0))
+        else:
+            self.correct_note.pack_forget()
+
+    def _show_download_progress(self):
+        done, total = self.dl_progress
+        self.dl_text.configure(text=t("downloading", model=self.downloading,
+                                      done=self._gb(done / 1e9), total=self._gb(total / 1e9)))
+        self.dl_bar.set(done / total if total else 0)
+
+    def download_model(self):
+        name = self.dl_labels[self.dl_choice.get()]
+        self.downloading, self.dl_progress = name, (0, int(core.WHISPER_SIZES[name] * 1e9))
+        cancel = self.dl_cancel = threading.Event()
+        self._update_model_state()
+
+        def work():
+            try:
+                core.download_model(name, lambda done, total: self.q.put(("dl_progress", (done, total))), cancel)
+                self.q.put(("dl_done", (name, None)))
+            except core.Cancelled:
+                self.q.put(("dl_done", (name, "cancelled")))
+            except Exception as e:
+                self.q.put(("dl_done", (name, e)))
+        threading.Thread(target=work, daemon=True).start()
+
+    def cancel_download(self):
+        self.dl_cancel.set()
+        self.dl_stop.configure(state="disabled")
+
+    def _download_done(self, name, err):
+        self.downloading = None
+        if err is None:
+            self.log(t("model_downloaded", model=name))
+            self.model.set(name)
+            self.refresh_info()
+            self._autosave()
+        elif err == "cancelled":
+            self.log(t("download_cancelled", model=name))
+        else:
+            self.log(t("error", err=err))
+        self._update_model_state()
+
     def _format_card(self, master):
-        """Oba ustawienia w jednym wierszu — zostaje więcej miejsca na log."""
+        """Typ pliku w pierwszym wierszu, długość linii w drugim — zostaje więcej miejsca na log."""
         c = Card(master, t("format"))
         row = ctk.CTkFrame(c, fg_color="transparent")
-        row.grid(row=1, column=0, columnspan=3, sticky="w", padx=18, pady=(2, 16))
+        row.grid(row=1, column=0, columnspan=3, sticky="w", padx=18, pady=(2, 8))
+        ctk.CTkLabel(row, text=t("file_type")).pack(side="left")
+        self.fmt = ctk.CTkSegmentedButton(row, values=list(core.FORMATS.values()), command=self._autosave)
+        self.fmt.set(core.FORMATS.get(self.cfg.get("format"), "SRT"))
+        self.fmt.pack(side="left", padx=(10, 0))
+        row = ctk.CTkFrame(c, fg_color="transparent")
+        row.grid(row=2, column=0, columnspan=3, sticky="w", padx=18, pady=(2, 16))
         ctk.CTkLabel(row, text=t("chars")).pack(side="left")
         self.chars = ctk.CTkOptionMenu(row, values=[str(n) for n in (32, 37, 40, 42, 45, 50)], width=80,
                                        command=self._autosave)
@@ -439,14 +620,14 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         self.fields.grid_columnconfigure(0, minsize=col - 2)
         self.fields.grid_columnconfigure(1, weight=1)
         self.tr_info = ctk.CTkLabel(c, text="", text_color=MUTED, font=font(12), justify="left", wraplength=440)
-        self.tr_info.grid(row=3, column=0, columnspan=3, sticky="w", padx=18, pady=(2, 10))
+        self.tr_info.grid(row=3, column=0, columnspan=3, sticky="w", padx=18, pady=(0, 4))
 
         ctk.CTkLabel(c, text=t("translate_to"), font=font(13, "bold")).grid(
-            row=4, column=0, columnspan=3, sticky="w", padx=18, pady=(4, 6))
+            row=4, column=0, columnspan=3, sticky="w", padx=18, pady=(2, 4))
         grid = ctk.CTkFrame(c, corner_radius=8)
         grid.grid(row=5, column=0, columnspan=3, sticky="ew", padx=18)
         grid.grid_anchor("nw")
-        c.grid_rowconfigure(8, weight=1)  # wolne miejsce dostaje pole kontekstu
+        c.grid_rowconfigure(8, weight=1)  # pole kontekstu wyrównuje kartę do lewej kolumny (rośnie okno → rośnie log)
         self.targets = {}
         chosen = set(self.cfg.get("targets", []))
         langs = sorted(core.LANGUAGES, key=lambda code: (code not in ("pl", "en", "de"), core.lang_name(code)))
@@ -459,11 +640,11 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         self._on_edit(self.other, self._autosave)
         if self._other_value(self.cfg.get("other", "")):
             self.other.insert(0, self.cfg["other"])
-        self.other.grid(row=6, column=0, columnspan=3, sticky="ew", padx=18, pady=(12, 4))
+        self.other.grid(row=6, column=0, columnspan=3, sticky="ew", padx=18, pady=(10, 0))
 
         ctk.CTkLabel(c, text=t("context"), text_color=MUTED, font=font(12)).grid(
-            row=7, column=0, columnspan=3, sticky="w", padx=18, pady=(10, 4))
-        self.context = ctk.CTkTextbox(c, height=70)
+            row=7, column=0, columnspan=3, sticky="w", padx=18, pady=(8, 2))
+        self.context = ctk.CTkTextbox(c, height=76, wrap="word")  # ~3 linijki, dłuższy tekst się przewija
         self.context.insert("1.0", self.cfg.get("context", ""))
         self.context.grid(row=8, column=0, columnspan=3, sticky="nsew", padx=18, pady=(0, 16))
         self.context.bind("<KeyRelease>", self._autosave, add="+")
@@ -494,6 +675,7 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         # w „wpisaną” wartość (nie da się go wtedy skasować)
         self.other.configure(state="readonly" if deepl else "normal",
                              fg_color=CONTROL if deepl else ("#FFFFFF", "#191B1F"))
+        self._update_correct_state()
 
     def _build_fields(self):
         """Pola silnika w kolejności: adres serwera → klucz → model (lista modeli zależy od dwóch pierwszych)."""
@@ -610,7 +792,7 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
     # ------------------------------------------------------------ pliki
 
     def add(self):
-        types = [(t("media_types"), " ".join("*" + e for e in core.MEDIA_EXT + (".srt",))), (t("all_files"), "*.*")]
+        types = [(t("media_types"), " ".join("*" + e for e in core.MEDIA_EXT + core.SUB_EXT)), (t("all_files"), "*.*")]
         self.add_paths(filedialog.askopenfilenames(title=t("choose_files"), filetypes=types))
 
     def clear(self):
@@ -664,7 +846,7 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
             if len(base) > 44:  # długą nazwę skracamy w środku — pełna ścieżka jest w dymku
                 base = base[:22] + "…" + base[-21:]
             name.configure(text=base)
-            kind.configure(text="SRT" if p.lower().endswith(".srt") else "media")
+            kind.configure(text=os.path.splitext(p)[1][1:].upper() if core.is_subtitle(p) else "media")
             remove.configure(command=lambda p=p: (self.paths.remove(p), self._render_files()))
             tip.text = os.path.normpath(p)
         if self._file_bar:
@@ -693,6 +875,93 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
 
     # ------------------------------------------------------------ log / kolejka
 
+    def _log_card(self, master):
+        c = Card(master, t("log"))
+        c.grid_rowconfigure(1, weight=1)
+        clear = self._secondary(c, t("clear"), self.clear_log, width=70)
+        clear.configure(height=24, font=font(12))
+        clear.grid(row=0, column=2, sticky="e", padx=18, pady=(12, 6))
+        self.log_box = ctk.CTkTextbox(c, height=40, corner_radius=8, border_width=0, wrap="word",
+                                      font=font(13), spacing1=2, spacing3=2)
+        self.log_box.grid(row=1, column=0, columnspan=3, sticky="nsew", padx=18, pady=(0, 16))
+        self._style_log()
+        self._log_in_file = False
+        for entry in self.log_entries:
+            self._log_write(entry)
+        self.log_box.see("end")
+        self.log_box.configure(state="disabled")  # tylko do odczytu, także gdy log jest pusty
+        return c
+
+    def _style_log(self):
+        """Tagi wyglądu wpisów. Kolory zależą od trybu jasny/ciemny, więc po jego zmianie — od nowa."""
+        self._log_mode = ctk.get_appearance_mode()
+        box = self.log_box._textbox  # zwykły tk.Text: CTkTextbox nie pozwala ustawić czcionki tagu
+        sc = ctk.ScalingTracker.get_widget_scaling(self)
+        family = ctk.ThemeManager.theme["CTkFont"]["family"]
+        bold = tkfont.Font(family=family, size=-round(13 * sc), weight="bold")
+        px = lambda v: round(v * sc)
+        box.tag_configure("file", font=bold, foreground=mode_color(TEXT), spacing1=px(14))  # odstęp między plikami
+        box.tag_configure("time", foreground=mode_color(MUTED), font=tkfont.Font(family=family, size=-round(11 * sc)))
+        box.tag_configure("text", foreground=mode_color(TEXT))
+        box.tag_configure("detail", foreground=mode_color(MUTED))
+        box.tag_configure("ok", foreground=mode_color(SUCCESS))
+        box.tag_configure("warn", foreground=mode_color(WARNING))
+        box.tag_configure("error", foreground=mode_color(DANGER_TEXT))
+        box.tag_configure("trace", foreground=mode_color(MUTED),
+                          font=tkfont.Font(family=mono_family(), size=-round(11 * sc)))
+        box.tag_configure("icon", font=tkfont.Font(family=family, size=-round(14 * sc), weight="bold"))
+        for name, color in (("done", SUCCESS), ("done_warn", WARNING), ("done_muted", MUTED)):
+            box.tag_configure(name, font=bold, foreground=mode_color(color), spacing1=px(14))
+        # wcięcia: ikona (✓ ! ✕) w swojej kolumnie, tekst — także zawinięty — równo za nią
+        icon, step = px(18), px(10)
+        for level in range(3):
+            base = level * step
+            text_x = base + (icon if level else 0)
+            box.tag_configure(f"L{level}", lmargin1=text_x, lmargin2=text_x)
+            box.tag_configure(f"L{level}i", lmargin1=base, lmargin2=base + icon, tabs=(base + icon,))
+        box.tag_raise("sel")
+
+    def _log_write(self, entry):
+        """Jeden wpis: nagłówek pliku (pogrubiony, z godziną), kroki wcięte pod nim, wynik z ikoną i kolorem."""
+        kind, val, stamp = entry
+        box = self.log_box._textbox
+        box.configure(state="normal")
+        if kind == "file":
+            self._log_in_file = True
+            box.insert("end", val, ("file", "L0"), "   " + stamp + "\n", ("time", "L0"))
+        else:
+            key, kw = getattr(val, "key", None), getattr(val, "kw", {})
+            style, icon = LOG_STYLE.get(key, ("text", ""))
+            if key in LOG_SHORT_PATH:  # pełna ścieżka jest pod „Otwórz folder”; w logu wystarczy nazwa pliku
+                text = t(key, **{**kw, "path": os.path.basename(kw["path"])})
+            elif key == "error":
+                text = str(kw["err"])
+            elif key:
+                text = t(key, **kw)  # po zmianie języka interfejsu — już w nowym języku
+            else:
+                text = str(val)
+                style = "trace" if text.startswith("Traceback") else style
+            end = key in LOG_END
+            if end:
+                self._log_in_file = False
+            level = 0 if end or not self._log_in_file else 2 if style == "detail" and not icon else 1
+            tags = (style, f"L{level}i" if icon else f"L{level}")
+            if icon:
+                box.insert("end", icon, tags + ("icon",), "\t", tags)
+            box.insert("end", text.strip(), tags)
+            if end:
+                box.insert("end", "   " + stamp, ("time", "L0"))
+            box.insert("end", "\n")
+        box.configure(state="disabled")
+
+    def clear_log(self):
+        self.log_entries.clear()
+        self._log_in_file = False
+        box = self.log_box._textbox
+        box.configure(state="normal")
+        box.delete("1.0", "end")
+        box.configure(state="disabled")
+
     def log(self, msg):
         self.q.put(("log", msg))
 
@@ -701,6 +970,10 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         jeden błąd Tk nie może zatrzymać logu, postępu i powrotu przycisku do „Generuj”."""
         try:
             self.check_grid.sync_mode()  # przełączenie jasny/ciemny w systemie
+            if self._log_mode != ctk.get_appearance_mode():
+                self._style_log()
+            if self.body.winfo_reqheight() != getattr(self, "_fitted_req", None):  # ustawienia urosły / zmalały
+                self._fit_window()
             while not self.q.empty():
                 kind, val = self.q.get()
                 try:
@@ -711,11 +984,11 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
             self.after(100, self.poll)
 
     def _handle(self, kind, val):
-        if kind == "log":
-            self.log_box.configure(state="normal")
-            self.log_box.insert("end", val + "\n")
+        if kind in ("log", "file"):
+            entry = (kind, val, time.strftime("%H:%M:%S"))
+            self.log_entries.append(entry)
+            self._log_write(entry)
             self.log_box.see("end")
-            self.log_box.configure(state="disabled")
         elif kind == "progress":
             self._show_progress(*val)
         elif kind == "info" and val[0] == self.info_id:  # starsze, wolniejsze odpowiedzi pomijamy
@@ -724,6 +997,12 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         elif kind == "ask_exists":
             path, reply = val
             self.prompt = ExistsPrompt(self, path, reply)
+        elif kind == "dl_progress":
+            self.dl_progress = val
+            if self.downloading:
+                self._show_download_progress()
+        elif kind == "dl_done":
+            self._download_done(*val)
         elif kind == "models":
             self._set_models(*val)
         elif kind == "output":
@@ -763,6 +1042,8 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
             speech=speech or "auto", model=self.model.get(), engine=self.engine_code,
             targets=[c for c, v in self.targets.items() if v.get()], other=self._other_value(self.other.get()),
             chars=int(self.chars.get()), lines=int(self.lines.get()),
+            format=next(k for k, v in core.FORMATS.items() if v == self.fmt.get()),
+            correct=bool(self.correct_var.get()),
             context=self.context.get("1.0", "end").strip(),
         )
 
@@ -788,7 +1069,8 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         opts = core.Options(
             language=self.speech_map[self.speech.get()], model=self.model.get(), targets=self._targets(),
             engine=self.engine_code, context=self.cfg["context"], chars=self.cfg["chars"],
-            lines=self.cfg["lines"], keys=dict(self.keys), settings=dict(self.cfg), on_exists=self._ask_exists,
+            lines=self.cfg["lines"], fmt=self.cfg["format"], keys=dict(self.keys), settings=dict(self.cfg), on_exists=self._ask_exists,
+            correct=self.cfg["correct"] and self.engine_code != "deepl",
         )
         self._exists_all = None  # odpowiedź „dla wszystkich” obowiązuje do końca tego zadania
         self._exists_lock = threading.Lock()
@@ -902,7 +1184,17 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
                 self.log(traceback.format_exc())
 
         try:
-            if opts.targets:  # niedostępny tłumacz zgłaszamy od razu, a nie po transkrypcji
+            if not core.model_cached(opts.model):  # modelu nie pobieramy po cichu — tylko z panelu w karcie
+                for path in files:
+                    if not core.is_subtitle(path):
+                        self.log(t("no_model_skip", name=os.path.basename(path)))
+                files = [p for p in files if core.is_subtitle(p)]  # pliki napisów: samo tłumaczenie
+                n = len(files)
+                if not files:
+                    self.q.put(("progress", (0, "")))
+                    return
+            if opts.targets or (opts.correct and not all(map(core.is_subtitle, files))):
+                # niedostępny tłumacz (do tłumaczeń lub poprawki) zgłaszamy od razu, a nie po transkrypcji
                 core.check_engine(opts.engine, opts.keys, opts.settings)
             reserved = set()  # ścieżki zajęte przez wcześniejsze pliki z tej kolejki
             plans = []
@@ -917,13 +1209,13 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
                 except core.Cancelled:
                     raise
                 except Exception as e:
-                    self.log(f"=== {os.path.basename(path)}")
+                    self.q.put(("file", os.path.basename(path)))
                     fail(path, e)
                     plans.append(None)
             for i, path in enumerate(files):
                 if plans[i] is None:
                     continue  # błąd już zgłoszony przy sprawdzaniu
-                self.log(f"=== {os.path.basename(path)}")
+                self.q.put(("file", os.path.basename(path)))
                 prefix = os.path.basename(path) + (f" ({i + 1}/{n})" if n > 1 else "")
 
                 def progress(v, stage=None, i=i, prefix=prefix):  # postęp pliku → postęp całej kolejki
