@@ -18,6 +18,9 @@ S = {
                       "instead of transcribing it."),
     "gpu_failed": ("GPU nie zadziałało ({err}). Przełączam na CPU — będzie wolniej.",
                    "GPU failed ({err}). Falling back to CPU — this will be slower."),
+    "srt_empty": ("Nie znaleziono napisów w pliku: {path}", "No subtitles found in the file: {path}"),
+    "cant_read_media": ("Nie da się odczytać dźwięku z pliku {name} — plik jest uszkodzony albo nie ma ścieżki audio.",
+                        "Can't read audio from {name} — the file is damaged or has no audio track."),
     "no_speech": ("Nie rozpoznano mowy.", "No speech detected."),
     "loaded_srt": ("Wczytano {n} napisów.", "Loaded {n} subtitles."),
     "saved_n": ("Zapisano: {path} ({n} napisów)", "Saved: {path} ({n} subtitles)"),
@@ -36,6 +39,8 @@ S = {
     "cli_error": ("Claude CLI zwróciło błąd: {err}", "Claude CLI returned an error: {err}"),
     "cli_login": (" — uruchom w terminalu: claude, i zaloguj się (/login).",
                   " — run `claude` in a terminal and sign in (/login)."),
+    "bad_response": ("Tłumacz zwrócił odpowiedź w nieoczekiwanym formacie ({err}). Spróbuj ponownie lub wybierz inny model.",
+                     "The translator returned a response in an unexpected format ({err}). Try again or choose another model."),
     "refusal": ("Claude odmówił przetłumaczenia tego fragmentu.", "Claude declined to translate this part."),
     "truncated": ("Odpowiedź Claude została ucięta (max_tokens).", "Claude's response was cut off (max_tokens)."),
     "deepl_no_key": ("Podaj klucz DeepL API.", "Enter a DeepL API key."),
@@ -116,6 +121,7 @@ S = {
     "working": ("Pracuję…", "Working…"),
     "add_first": ("Dodaj najpierw plik.", "Add a file first."),
     "done": ("Gotowe.", "Done."),
+    "done_with_errors": ("Gotowe, z błędami ({n}): {files}", "Done, with errors ({n}): {files}"),
     "error": ("BŁĄD: {err}", "ERROR: {err}"),
 }
 

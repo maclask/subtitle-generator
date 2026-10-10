@@ -84,24 +84,69 @@ def check_cancel():
         raise Cancelled()
 
 
-def _run_proc(cmd, input_text, cwd=None):
-    """subprocess.run, który da się przerwać przyciskiem Stop (zabija proces)."""
+_ACTIVE = set()  # uruchomione procesy tłumaczy (do zabicia przy Stop / zamknięciu okna)
+_ACTIVE_LOCK = threading.Lock()
+
+
+def _kill_tree(proc):
+    """Zabija proces razem z potomkami (np. shim npm → node → właściwy codex)."""
+    import signal
     import subprocess
 
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, encoding="utf-8", cwd=cwd,
-                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    pending = input_text
-    while True:
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)  # proces startuje we własnej grupie (start_new_session)
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def kill_active():
+    """Natychmiast zabija wszystkie uruchomione procesy tłumaczy (zamknięcie okna)."""
+    CANCEL.set()
+    with _ACTIVE_LOCK:
+        procs = list(_ACTIVE)
+    for proc in procs:
+        _kill_tree(proc)
+
+
+def _run_proc(cmd, input_text, cwd=None):
+    """subprocess.run, który da się przerwać przyciskiem Stop (zabija całe drzewo procesów)."""
+    import subprocess
+    import tempfile
+
+    win = sys.platform == "win32"
+    flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if win else 0
+    # osobny pusty katalog roboczy: CLI nie wczyta CLAUDE.md ani ustawień z bieżącego folderu
+    with tempfile.TemporaryDirectory() as tmp:
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, encoding="utf-8", cwd=cwd or tmp, creationflags=flags,
+                                start_new_session=not win)
+        with _ACTIVE_LOCK:
+            _ACTIVE.add(proc)
         try:
-            out, err = proc.communicate(pending, timeout=0.3)
-            return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
-        except subprocess.TimeoutExpired:
-            pending = None  # stdin wysłane przy pierwszym wywołaniu
-            if CANCEL.is_set():
-                proc.kill()
-                proc.communicate()
-                raise Cancelled()
+            pending = input_text
+            while True:
+                try:
+                    out, err = proc.communicate(pending, timeout=0.3)
+                    if CANCEL.is_set():
+                        raise Cancelled()
+                    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+                except subprocess.TimeoutExpired:
+                    pending = None  # stdin wysłane przy pierwszym wywołaniu
+                    if CANCEL.is_set():
+                        _kill_tree(proc)
+                        proc.communicate()
+                        raise Cancelled()
+        finally:
+            with _ACTIVE_LOCK:
+                _ACTIVE.discard(proc)
 
 
 @dataclass
@@ -159,20 +204,31 @@ def _load_model(model_name, device, log, progress):
 
     key = (model_name, device)
     if key not in _LOADED:
-        _LOADED.clear()  # jeden model naraz — pamięć karty
         dev = "GPU" if device == "cuda" else "CPU"
         cached = _model_cached(model_name)
         log(t("loading_model" if cached else "downloading_model", model=model_name, dev=dev))
         progress(None, t("stage_loading") if cached else t("stage_download"))
-        _LOADED[key] = WhisperModel(model_name, device=device, compute_type="float16" if device == "cuda" else "int8")
+        model = WhisperModel(model_name, device=device, compute_type="float16" if device == "cuda" else "int8")
+        _LOADED.clear()  # jeden model naraz (pamięć karty) — dopiero gdy nowy się załadował
+        _LOADED[key] = model
     return _LOADED[key]
+
+
+def _decode(path):
+    """Dźwięk z pliku (16 kHz mono). Nieczytelny plik → zrozumiały komunikat zamiast błędu FFmpeg."""
+    from faster_whisper import decode_audio
+
+    try:
+        return decode_audio(path)
+    except Exception as e:
+        if type(e).__module__.startswith("av"):  # błędy PyAV/FFmpeg: uszkodzony plik, brak ścieżki audio…
+            raise RuntimeError(t("cant_read_media", name=os.path.basename(path))) from e
+        raise
 
 
 def _run_whisper(path, language, model_name, device, log, progress):
     model = _load_model(model_name, device, log, progress)
-    from faster_whisper import decode_audio
-
-    audio = decode_audio(path)
+    audio = _decode(path)
     check_cancel()
     if language:
         # Whisper z wymuszonym złym językiem nie zapisuje mowy, tylko ją (słabo) tłumaczy — sprawdzamy to
@@ -209,17 +265,39 @@ def _model_cached(model_name):
         return False
 
 
+_gpu_usable = None  # None = nie wiadomo; False po pierwszej porażce — potem od razu CPU
+
+
+def gpu_available():
+    global _gpu_usable
+    if _gpu_usable is None:
+        if sys.platform == "darwin":  # CTranslate2 na macOS nie ma CUDA
+            _gpu_usable = False
+        else:
+            try:
+                _add_cuda_dll_paths()
+                import ctranslate2
+
+                _gpu_usable = ctranslate2.get_cuda_device_count() > 0
+            except Exception:
+                _gpu_usable = False
+    return _gpu_usable
+
+
 def _on_gpu_or_cpu(run, log):
-    """run(device): najpierw GPU, a gdy CUDA zawiedzie — CPU."""
-    _add_cuda_dll_paths()
+    """run(device): na GPU, jeśli jest; gdy CUDA zawiedzie — CPU (i zapamiętujemy to do końca sesji)."""
+    global _gpu_usable
+    if not gpu_available():
+        return run("cpu")
     try:
         return run("cuda")
     except Cancelled:
         raise
-    except Exception as e:  # brak CUDA/cuDNN, nieobsługiwana karta itp.
-        if not any(w in str(e).lower() for w in ("cuda", "cublas", "cudnn", "gpu", "device", "dll", ".so")):
+    except Exception as e:  # brak cuDNN, nieobsługiwana karta, za mało pamięci GPU…
+        if not any(w in str(e).lower() for w in ("cuda", "cublas", "cudnn", "gpu", ".dll", ".so", "out of memory")):
             raise  # np. uszkodzony plik — CPU nic tu nie pomoże
         log(t("gpu_failed", err=e))
+        _gpu_usable = False
         return run("cpu")
 
 
@@ -231,11 +309,9 @@ def transcribe(path, language, model_name, log, progress):
 def detect_language(path, model_name, log, progress=lambda v, stage=None: None):
     """Szybkie wykrycie języka mowy (bez transkrypcji)."""
     def run(device):
-        from faster_whisper import decode_audio
-
         model = _load_model(model_name, device, log, progress)
         progress(None, t("stage_detect"))
-        lang, prob, _ = model.detect_language(decode_audio(path), vad_filter=True, language_detection_segments=3)
+        lang, prob, _ = model.detect_language(_decode(path), vad_filter=True, language_detection_segments=3)
         log(t("detected_short", lang=lang_name(lang), prob=prob))
         return lang
     return _on_gpu_or_cpu(run, log)
@@ -243,7 +319,16 @@ def detect_language(path, model_name, log, progress=lambda v, stage=None: None):
 
 # ---------------------------------------------------------------- podział na napisy
 
-SENTENCE_END = (".", "?", "!", "…")
+SENTENCE_END = (".", "?", "!", "…", "。", "？", "！")
+CLAUSE_END = (",", ";", ":", "–", "-", "，", "、", "；", "：")
+# języki pisane bez spacji między słowami: Whisper zwraca je znak po znaku, linie liczymy krócej
+NO_SPACE = {"zh", "ja", "th", "lo", "my", "yue", "km"}
+NO_SPACE_CHARS = 16  # zalecana długość linii napisów dla chińskiego/japońskiego
+
+
+def line_chars(lang, chars):
+    """Długość linii dla języka: dla języków bez spacji najwyżej NO_SPACE_CHARS."""
+    return min(chars, NO_SPACE_CHARS) if lang in NO_SPACE else chars
 ABBREV = {"m.in.", "np.", "tzn.", "tj.", "itd.", "itp.", "ok.", "ul.", "dr.", "prof.", "godz.", "r.",
           "z.b.", "bzw.", "usw.", "ca.", "e.g.", "i.e.", "etc.", "vs.", "mr.", "mrs.", "dr"}
 # przed tymi słowami wolno zacząć nowy napis
@@ -272,8 +357,11 @@ def _merge_fragments(words):
     return out
 
 
-def build_cues(words, max_chars=42, max_lines=2, max_dur=6.0, max_gap=0.7):
-    words = _merge_fragments(words)
+def build_cues(words, max_chars=42, max_lines=2, max_dur=6.0, max_gap=0.7, lang=None):
+    if lang in NO_SPACE:
+        max_chars = line_chars(lang, max_chars)  # słowa bez spacji — nie sklejamy ich w „jedno słowo”
+    else:
+        words = _merge_fragments(words)
     limit = max_chars * max_lines
     soft = int(max_chars * 0.7)
     cues, cur = [], []
@@ -302,16 +390,16 @@ def build_cues(words, max_chars=42, max_lines=2, max_dur=6.0, max_gap=0.7):
             if too_long or w.start - cur[-1].end > max_gap or w.end - cur[0].start > max_dur:
                 # jeśli się da, tniemy po przecinku / przed spójnikiem w drugiej połowie napisu
                 cut = next((k + 1 for k in range(len(cur) - 1, len(cur) // 2 - 1, -1)
-                            if cur[k].word.strip().endswith(",")
+                            if cur[k].word.strip().endswith(CLAUSE_END[:1] + CLAUSE_END[-4:])
                             or (k + 1 < len(cur) and cur[k + 1].word.strip().lower() in CONJ)), None)
                 flush(cut if too_long else None)
             elif (len(_join(cur)) >= soft
-                  and (cur[-1].word.strip().endswith((",", ";", ":", "–", "-"))
+                  and (cur[-1].word.strip().endswith(CLAUSE_END)
                        or w.word.strip().lower() in CONJ)
                   and not sentence_fits(i)):
                 flush()  # naturalna pauza w długim zdaniu
         cur.append(w)
-        if _sentence_end(w) and len(_join(cur)) >= 12:
+        if _sentence_end(w) and len(_join(cur)) >= (4 if lang in NO_SPACE else 12):
             flush()
     flush()
     return fix_timing(cues)
@@ -340,12 +428,27 @@ def _break_cost(text, i, max_chars):
     return cost
 
 
+def _wrap_no_space(text, max_chars):
+    """Tekst bez spacji (chiński, japoński…): równe linie, cięcie najchętniej po znaku interpunkcji."""
+    lines = []
+    while len(text) > max_chars:
+        n_lines = -(-len(text) // max_chars)
+        target = -(-len(text) // n_lines)
+        cut = next((i + 1 for i in range(target, max(target - 5, 0), -1)
+                    if i < len(text) and text[i] in "，、。？！,.?!"), target)
+        lines.append(text[:cut])
+        text = text[cut:]
+    return "\n".join(lines + [text])
+
+
 def wrap(text, max_chars=42):
     """Dzieli tekst na 2 linie: równe długości, cięcie po przecinku, bez jednoliterowych słów na końcu."""
     text = " ".join(text.split())
     if len(text) <= max_chars:
         return text
     spaces = [m.start() for m in re.finditer(" ", text)]
+    if not spaces or len(spaces) < len(text) / 25:  # pismo bez spacji (lub prawie bez)
+        return _wrap_no_space(text, max_chars)
     if len(text) <= 2 * max_chars + 5 and spaces:
         best = min(spaces, key=lambda i: _break_cost(text, i, max_chars))
         return text[:best] + "\n" + text[best + 1:]
@@ -362,29 +465,58 @@ def _ts(t):
     return f"{h:02}:{m:02}:{s:02},{ms:03}"
 
 
-def write_srt(cues, path, max_chars=42):
+def write_srt(cues, path, max_chars=42, lang=None):
+    max_chars = line_chars(lang, max_chars)
     with open(path, "w", encoding="utf-8") as f:
         for i, c in enumerate(cues, 1):
-            f.write(f"{i}\n{_ts(c.start)} --> {_ts(c.end)}\n{wrap(c.text, max_chars)}\n\n")
+            f.write(f"{i}\n{_ts(c.start)} --> {_ts(c.end)}\n{wrap(c.text, max_chars) or '…'}\n\n")
+
+
+_TS = re.compile(r"(?:(\d+):)?(\d+):(\d+)[,.](\d+)")
 
 
 def _parse_ts(s):
-    h, m, rest = s.strip().replace(".", ",").split(":")
-    sec, ms = rest.split(",")
-    return int(h) * 3600 + int(m) * 60 + int(sec) + int(ms) / 1000
+    m = _TS.search(s)
+    if not m:
+        raise ValueError(s)
+    h, mi, sec, ms = m.groups()
+    return int(h or 0) * 3600 + int(mi) * 60 + int(sec) + int(ms.ljust(3, "0")[:3]) / 1000
+
+
+def _read_text(path):
+    """UTF-8 / UTF-16 (wg BOM), a gdy to nie UTF-8 — Windows-1250/1252 (eksporty z części programów)."""
+    raw = open(path, "rb").read()
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw.decode("utf-16")
+    for enc in ("utf-8-sig", "cp1250", "cp1252"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("latin-1")
 
 
 def read_srt(path):
-    with open(path, encoding="utf-8-sig") as f:
-        blocks = re.split(r"\n\s*\n", f.read().replace("\r\n", "\n").strip())
+    lines = _read_text(path).replace("\r\n", "\n").replace("\r", "\n").split("\n")
     cues = []
-    for b in blocks:
-        lines = b.strip().split("\n")
-        idx = next((i for i, l in enumerate(lines) if "-->" in l), None)
-        if idx is None:
+    for i, line in enumerate(lines):
+        if "-->" not in line:
             continue
-        a, z = lines[idx].split("-->")
-        cues.append(Cue(_parse_ts(a), _parse_ts(z.split()[0]), " ".join(lines[idx + 1:]).strip()))
+        a, z = line.split("-->", 1)
+        try:
+            start, end = _parse_ts(a), _parse_ts(z)
+        except ValueError:
+            continue
+        text = []  # treść: do następnej linii z czasem (pusta linia w środku napisu nie ucina tekstu)
+        for nxt in lines[i + 1:]:
+            if "-->" in nxt:
+                break
+            text.append(nxt.strip())
+        while text and (not text[-1] or text[-1].isdigit()):  # pusta linia i numer następnego napisu
+            text.pop()
+        cues.append(Cue(start, end, " ".join(x for x in text if x)))
+    if not cues:
+        raise RuntimeError(t("srt_empty", path=path))
     return cues
 
 
@@ -586,10 +718,15 @@ def _translate_llm(cues, src, tgt, context, log, ask, chunk=80, progress=lambda 
         for attempt in range(2):
             user = intro + "Cues to translate:\n" + json.dumps(
                 [{"id": i, "text": t} for i, t in missing.items()], ensure_ascii=False)
-            for item in ask(system, user):
-                if item["id"] in missing:
-                    out[item["id"]].text = item["text"]
-                    del missing[item["id"]]
+            try:
+                items = list(ask(system, user))
+            except (ValueError, KeyError, TypeError, StopIteration) as e:  # odpowiedź nie jest oczekiwanym JSON-em
+                raise RuntimeError(t("bad_response", err=type(e).__name__)) from e
+            for item in items:
+                tid, text = (item.get("id"), item.get("text")) if isinstance(item, dict) else (None, None)
+                if tid in missing and isinstance(text, str) and text.strip():  # pusty tekst = brak tłumaczenia
+                    out[tid].text = text
+                    del missing[tid]
             if not missing:
                 break
             log(t("retry_missing", n=len(missing)))
@@ -653,7 +790,7 @@ def _translate_deepl(cues, src, tgt, context, key, progress=lambda v: None, chun
     target = LANGUAGES.get(tgt, (None, None, None))[2]
     if not target:
         raise RuntimeError(t("deepl_lang", lang=lang_name(tgt)))
-    source = src.upper() if src in LANGUAGES and LANGUAGES[src][2] else None
+    source = LANGUAGES[src][2].split("-")[0] if src in LANGUAGES and LANGUAGES[src][2] else None
     tr = deepl.Translator(key)
     out = []
     for start in range(0, len(cues), chunk):
@@ -748,7 +885,7 @@ def stt_info(model_name):
         _add_cuda_dll_paths()
         import ctranslate2
 
-        dev = "GPU (CUDA)" if ctranslate2.get_cuda_device_count() > 0 else "CPU"
+        dev = "GPU (CUDA)" if gpu_available() else "CPU"
     except Exception:
         dev = "CPU"
     return f"Whisper {model_name} · faster-whisper · {dev}"
@@ -850,21 +987,35 @@ class Options:
 STT_WEIGHT, TRANSLATE_WEIGHT = 1.0, 0.4  # względny czas etapów (rozpoznawanie mowy vs jedno tłumaczenie)
 
 
-def free_name(path):
-    """film.en.srt → film.en (2).srt → film.en (3).srt… — pierwsza wolna nazwa."""
+def _norm(path):
+    return os.path.normcase(os.path.abspath(path))
+
+
+def free_name(path, reserved=()):
+    """film.en.srt → film.en (2).srt → film.en (3).srt… — pierwsza wolna (i niezarezerwowana) nazwa."""
     base, ext = os.path.splitext(path)
     n = 2
-    while os.path.exists(f"{base} ({n}){ext}"):
+    while os.path.exists(f"{base} ({n}){ext}") or _norm(f"{base} ({n}){ext}") in reserved:
         n += 1
     return f"{base} ({n}){ext}"
 
 
-def output_path(path, on_exists):
-    """Ścieżka do zapisu albo None (pomiń). on_exists(path) → 'overwrite' | 'copy' | 'skip'."""
-    if not os.path.exists(path):
-        return path
-    choice = on_exists(path) if on_exists else "copy"
-    return path if choice == "overwrite" else None if choice == "skip" else free_name(path)
+def output_path(path, on_exists, reserved=None):
+    """Ścieżka do zapisu albo None (pomiń). on_exists(path) → 'overwrite' | 'copy' | 'skip'.
+
+    reserved: ścieżki, które zapisze już inny plik z tego samego zadania (np. film.mp4 i film.mov →
+    oba chcą film.pl.srt). Takiej ścieżki nie nadpisujemy — drugi plik dostaje kopię, bez pytania."""
+    reserved = set() if reserved is None else reserved
+    if _norm(path) in reserved:
+        out = free_name(path, reserved)
+    elif not os.path.exists(path):
+        out = path
+    else:
+        choice = on_exists(path) if on_exists else "copy"
+        out = path if choice == "overwrite" else None if choice == "skip" else free_name(path, reserved)
+    if out:
+        reserved.add(_norm(out))
+    return out
 
 
 # równoległe tłumaczenia na kilka języków; lokalny model (Ollama) liczy na jednej karcie, więc po kolei
@@ -880,22 +1031,35 @@ def _names(path, o, src=None):
     return folder, name
 
 
-def plan_outputs(path, o, log, progress=lambda v, stage=None: None):
+def unique_targets(targets, src=None):
+    """Języki docelowe bez powtórzeń i bez kolizji nazw plików („Serbian (Latin)” i „serbian-latin”)."""
+    seen, out = set(), []
+    for tgt in dict.fromkeys(targets):
+        suffix = file_suffix(tgt)
+        if tgt != src and suffix not in seen and suffix != src:
+            seen.add(suffix)
+            out.append(tgt)
+    return out
+
+
+def plan_outputs(path, o, log, progress=lambda v, stage=None: None, reserved=None):
     """Przed jakąkolwiek pracą: decyzje o plikach, które już istnieją (pyta przez o.on_exists).
 
     Zwraca {"src": język źródła lub None, "out": {język: ścieżka zapisu lub None = pomiń}}.
     Przy automatycznym wykrywaniu język mowy ustalamy tylko wtedy, gdy obok leży już jakiś plik napisów."""
     media = not path.lower().endswith(".srt")
     src = o.language
+    if not media and not src:
+        raise RuntimeError(t("srt_needs_lang"))  # zgłaszamy od razu, przed pytaniami o inne pliki
     folder, name = _names(path, o, src)
     if media and not src and any(os.path.exists(os.path.join(folder, f"{name}.{c}.srt")) for c in LANGUAGES):
         src = detect_language(path, o.model, log, progress)
-    langs = ([src] if media and src else []) + [x for x in dict.fromkeys(o.targets) if x != src]
+    langs = ([src] if media and src else []) + unique_targets(o.targets, src)
     out = {}
     for lang in langs:
         check_cancel()
         target = os.path.join(folder, f"{name}.{file_suffix(lang)}.srt")
-        out[lang] = output_path(target, o.on_exists)
+        out[lang] = output_path(target, o.on_exists, reserved)
         if out[lang] is None:
             log(t("skipped_existing", path=target))
     return {"src": src, "out": out}
@@ -908,9 +1072,11 @@ def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     media = not path.lower().endswith(".srt")
-    n_tr = len([x for x in o.targets if x != o.language])
+    n_tr = len(unique_targets(o.targets, o.language))
     total = (STT_WEIGHT if media else 0) + TRANSLATE_WEIGHT * n_tr or 1
     offset = 0.0
+    if o.out_dir:
+        os.makedirs(o.out_dir, exist_ok=True)  # brak folderu zgłosilibyśmy dopiero po transkrypcji
 
     def stage(weight, label=None):
         def report(v, lbl=None):
@@ -932,11 +1098,11 @@ def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda
             log(t("skipped_existing", path=target_path))
         return out
 
-    def save(cues, target_path, message, resolved=False):
+    def save(cues, target_path, message, lang, resolved=False):
         out = target_path if resolved else resolve(target_path)
         if out is None:
             return
-        write_srt(cues, out, o.chars)
+        write_srt(cues, out, o.chars, lang)
         written.append(out)
         saved(out)
         log(message(out))
@@ -959,18 +1125,17 @@ def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda
         if not words:
             log(t("no_speech"))
             return written
-        cues = build_cues(words, o.chars, o.lines)
+        cues = build_cues(words, o.chars, o.lines, lang=src)
         out = resolve(os.path.join(folder, f"{name}.{src}.srt"), src)
-        save(cues, out, lambda out: t("saved_n", path=out, n=len(cues)), resolved=True)
+        save(cues, out, lambda out: t("saved_n", path=out, n=len(cues)), src, resolved=True)
 
     # o istniejące pliki tłumaczeń pytamy przed tłumaczeniem — pominięte języki nie są tłumaczone
     plan = {}
-    for tgt in dict.fromkeys(o.targets):
-        if tgt != src:
-            check_cancel()
-            out = resolve(os.path.join(folder, f"{name}.{file_suffix(tgt)}.srt"), tgt)
-            if out:
-                plan[tgt] = out
+    for tgt in unique_targets(o.targets, src):
+        check_cancel()
+        out = resolve(os.path.join(folder, f"{name}.{file_suffix(tgt)}.srt"), tgt)
+        if out:
+            plan[tgt] = out
     targets = list(plan)
     total = offset + TRANSLATE_WEIGHT * len(targets) or 1
     done = {x: 0.0 for x in targets}
@@ -1002,8 +1167,8 @@ def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda
                 log(t("error", err=e))
                 failed.append(e)
                 continue
-            save(translated, plan[tgt], lambda out: t("saved", path=out), resolved=True)
-    if failed and len(failed) == len(targets):
+            save(translated, plan[tgt], lambda out: t("saved", path=out), tgt, resolved=True)
+    if failed:  # błędy są już w logu; plik liczy się jako „z błędami” (CLI: kod wyjścia 1)
         raise AlreadyReported()
     progress(1.0, t("done"))
     return written

@@ -78,13 +78,13 @@ Model Whisper (ok. 3 GB dla large-v3) pobiera się przy pierwszej transkrypcji.
 | **Własne API** | Dowolny serwer zgodny z API OpenAI: adres, model i opcjonalny klucz (`CUSTOM_API_KEY`). Przykłady: `https://openrouter.ai/api/v1`, LM Studio `http://localhost:1234/v1`. |
 | **DeepL** | Wklej [klucz DeepL](https://www.deepl.com/pro-api) (wystarczy plan Free) albo ustaw `DEEPL_API_KEY`. Obsługuje tylko języki DeepL; pozostałe przetłumaczy tłumacz LLM. |
 
-Klucze wpisane w programie trafiają do systemowego magazynu haseł: na Windows do Menedżera poświadczeń, na macOS do Pęku kluczy, na Linuksie do Secret Service (GNOME Keyring lub KWallet). Nigdy nie są zapisywane w folderze programu.
+Klucze wpisane w programie trafiają do systemowego magazynu haseł: na Windows do Menedżera poświadczeń, na macOS do Pęku kluczy, na Linuksie do Secret Service (GNOME Keyring lub KWallet). Nie trafiają do `config.json` ani nigdzie indziej w folderze programu.
 
 ## Użycie
 
 ### GUI
 
-1. **Dodaj pliki**: przeciągnij je na okno albo użyj **Dodaj pliki…**. Możesz dodać wideo, audio, gotowy plik `.srt` (zostanie przetłumaczony bez transkrypcji) albo cały folder. Po najechaniu na nazwę pliku widać pełną ścieżkę.
+1. **Dodaj pliki**: przeciągnij je na okno albo użyj **Dodaj pliki…**. Możesz dodać wideo, audio, albo gotowy plik `.srt` (zostanie przetłumaczony bez transkrypcji). Przeciągnięcie folderu dodaje wszystkie obsługiwane pliki z niego. Po najechaniu na nazwę pliku widać pełną ścieżkę.
 2. Wybierz **język mowy** (domyślnie wykrywany automatycznie) i **model**. `large-v3` jest najdokładniejszy, `large-v3-turbo` kilka razy szybszy. Jeśli wybrany język wyraźnie nie pasuje do nagrania, program użyje wykrytego i napisze o tym w logu.
 3. Opcjonalnie zaznacz **języki docelowe** i wybierz tłumacza. Przy tłumaczach API lista modeli uzupełnia się z Twojego konta po wpisaniu klucza. Języki spoza listy wpisz w pole **Inne języki** (tylko tłumacze LLM).
 4. Opcjonalnie dodaj **kontekst**: temat, nazwy własne, słownik albo regułę, np. *nie tłumacz nazwy marki*.
@@ -126,7 +126,7 @@ W Premiere Pro: **File → Import**, wybierz `.srt` i przeciągnij na timeline.
 | *GPU nie zadziałało… przełączam na CPU* | Zaktualizuj sterownik NVIDIA. Transkrypcja nadal działa na procesorze, tylko wolniej. |
 | *Claude CLI: Failed to authenticate* | Uruchom w terminalu `claude` i zaloguj się przez `/login`. |
 | Tłumaczenie przez Ollamę jest bardzo wolne | Wybierz mniejszy model, który zmieści się w pamięci karty (np. 7–14 mld parametrów). |
-| *Brak systemowego magazynu haseł* (Linux) | Zainstaluj i odblokuj GNOME Keyring lub KWallet albo ustaw `ANTHROPIC_API_KEY` / `DEEPL_API_KEY`. |
+| *Brak systemowego magazynu haseł* (Linux) | Zainstaluj i odblokuj GNOME Keyring lub KWallet albo ustaw `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `CUSTOM_API_KEY` lub `DEEPL_API_KEY`. |
 | `setup` nie znajduje Pythona | Zainstaluj Pythona 3.10–3.13. Nowsze wersje mogą jeszcze nie mieć wszystkich zależności. |
 
 Ustawienia (bez kluczy) zapisują się w `config.json` w folderze programu.

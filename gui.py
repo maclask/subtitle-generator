@@ -367,6 +367,9 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         log_text = self.log_box.get("1.0", "end-1c")
         self.body.destroy()
         self.build(log_text)
+        prompt = getattr(self, "prompt", None)
+        if prompt is not None and prompt.winfo_exists():
+            prompt.lift()  # nowe okno główne przykryłoby otwarte pytanie
 
     # ------------------------------------------------------------ sekcje
 
@@ -543,6 +546,8 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         if not self.model_box:
             return
         engine, keys, settings = self.engine_code, dict(self.keys), dict(self.cfg)
+        for field, w in self.settings.items():  # wartości prosto z pól — zapis do cfg może jeszcze nie nastąpić
+            settings[f"{engine}_{field}"] = w.get().strip()
         self.models_id = getattr(self, "models_id", 0) + 1
         req = self.models_id
         threading.Thread(target=lambda: self.q.put(("models", (req, core.list_models(engine, keys, settings)))),
@@ -686,31 +691,41 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         self.q.put(("log", msg))
 
     def poll(self):
-        self.check_grid.sync_mode()  # przełączenie jasny/ciemny w systemie
-        while not self.q.empty():
-            kind, val = self.q.get()
-            if kind == "log":
-                self.log_box.configure(state="normal")
-                self.log_box.insert("end", val + "\n")
-                self.log_box.see("end")
-                self.log_box.configure(state="disabled")
-            elif kind == "progress":
-                self._show_progress(*val)
-            elif kind == "info" and val[0] == self.info_id:  # starsze, wolniejsze odpowiedzi pomijamy
-                self.stt_info.configure(text=val[1])
-                self.tr_info.configure(text=val[2])
-            elif kind == "ask_exists":
-                path, reply = val
-                self.prompt = ExistsPrompt(self, path, reply)
-            elif kind == "models":
-                self._set_models(*val)
-            elif kind == "output":
-                self.outputs.append(val)
-                self.open_btn.configure(state="normal")
-            elif kind == "done":
-                self._close_prompt()
-                self._set_running(False)
-        self.after(100, self.poll)
+        """Obsługa komunikatów z wątków. Każdy komunikat osobno, a pętla zawsze planuje się dalej —
+        jeden błąd Tk nie może zatrzymać logu, postępu i powrotu przycisku do „Generuj”."""
+        try:
+            self.check_grid.sync_mode()  # przełączenie jasny/ciemny w systemie
+            while not self.q.empty():
+                kind, val = self.q.get()
+                try:
+                    self._handle(kind, val)
+                except tk.TclError:
+                    traceback.print_exc()
+        finally:
+            self.after(100, self.poll)
+
+    def _handle(self, kind, val):
+        if kind == "log":
+            self.log_box.configure(state="normal")
+            self.log_box.insert("end", val + "\n")
+            self.log_box.see("end")
+            self.log_box.configure(state="disabled")
+        elif kind == "progress":
+            self._show_progress(*val)
+        elif kind == "info" and val[0] == self.info_id:  # starsze, wolniejsze odpowiedzi pomijamy
+            self.stt_info.configure(text=val[1])
+            self.tr_info.configure(text=val[2])
+        elif kind == "ask_exists":
+            path, reply = val
+            self.prompt = ExistsPrompt(self, path, reply)
+        elif kind == "models":
+            self._set_models(*val)
+        elif kind == "output":
+            self.outputs.append(val)
+            self.open_btn.configure(state="normal")
+        elif kind == "done":
+            self._close_prompt()
+            self._set_running(False)
 
     # ------------------------------------------------------------ praca
 
@@ -730,7 +745,7 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
 
     def on_close(self):
         self._save_now()
-        core.CANCEL.set()  # zatrzymaj ewentualną pracę w tle
+        core.kill_active()  # zatrzymaj pracę i zabij procesy tłumaczy, zanim zniknie interpreter
         self.destroy()
 
     def _collect(self):
@@ -866,18 +881,40 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         self.status.configure(text=text)
 
     def work(self, files, opts):
-        n = len(files)
+        """Najpierw sprawdzenie tłumacza i wszystkie pytania o istniejące pliki, potem praca plik po pliku.
+        Błąd jednego pliku nie przerywa kolejki — na końcu podsumowanie."""
+        n, failed = len(files), []
+
+        def fail(path, e):
+            failed.append(os.path.basename(path))
+            if isinstance(e, core.AlreadyReported):
+                return  # szczegóły są już w logu
+            self.log(t("error", err=e))
+            if not isinstance(e, (RuntimeError, OSError)):  # nieprzewidziane — ze śladem do zgłoszenia
+                self.log(traceback.format_exc())
+
         try:
             if opts.targets:  # niedostępny tłumacz zgłaszamy od razu, a nie po transkrypcji
                 core.check_engine(opts.engine, opts.keys, opts.settings)
-            # najpierw wszystkie pytania o istniejące pliki — potem praca bez przerw
+            reserved = set()  # ścieżki zajęte przez wcześniejsze pliki z tej kolejki
             plans = []
             for i, path in enumerate(files):
                 stage = t("stage_checking") + (f" ({i + 1}/{n})" if n > 1 else "")
                 self.q.put(("progress", (None, stage)))
-                plans.append(core.plan_outputs(path, opts, self.log,
-                                               lambda v, s=None, st=stage: self.q.put(("progress", (None, f"{st} · {s}" if s else st)))))
+                try:
+                    plans.append(core.plan_outputs(
+                        path, opts, self.log,
+                        lambda v, s=None, st=stage: self.q.put(("progress", (None, f"{st} · {s}" if s else st))),
+                        reserved=reserved))
+                except core.Cancelled:
+                    raise
+                except Exception as e:
+                    self.log(f"=== {os.path.basename(path)}")
+                    fail(path, e)
+                    plans.append(None)
             for i, path in enumerate(files):
+                if plans[i] is None:
+                    continue  # błąd już zgłoszony przy sprawdzaniu
                 self.log(f"=== {os.path.basename(path)}")
                 prefix = os.path.basename(path) + (f" ({i + 1}/{n})" if n > 1 else "")
 
@@ -887,18 +924,25 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
                     self.q.put(("progress", (overall, " · ".join(x for x in (prefix, stage, pct) if x))))
 
                 progress(0, "")
-                core.process_file(path, opts, self.log, progress, saved=lambda out: self.q.put(("output", out)),
-                                  plan=plans[i])
-            self.q.put(("progress", (1.0, t("done"))))
-            self.log(t("done"))
+                try:
+                    core.process_file(path, opts, self.log, progress,
+                                      saved=lambda out: self.q.put(("output", out)), plan=plans[i])
+                except core.Cancelled:
+                    raise
+                except Exception as e:
+                    fail(path, e)
+            if failed:
+                summary = t("done_with_errors", n=len(failed), files=", ".join(failed))
+            else:
+                summary = t("done")
+            self.q.put(("progress", (1.0, summary)))
+            self.log(summary)
         except core.Cancelled:
             self.log(t("cancelled"))
             self.q.put(("progress", (0, t("cancelled"))))
-        except core.AlreadyReported:
-            pass  # błędy zostały już wypisane w logu
-        except RuntimeError as e:  # przewidziane błędy (brak klucza, brak CLI…) — sam komunikat
+        except RuntimeError as e:  # np. niedostępny tłumacz — sam komunikat
             self.log(t("error", err=e))
-        except Exception as e:  # nieprzewidziane — ze śladem, żeby dało się zgłosić błąd
+        except Exception as e:
             self.log(t("error", err=e))
             self.log(traceback.format_exc())
         finally:

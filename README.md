@@ -78,13 +78,13 @@ The Whisper model (about 3 GB for large-v3) downloads on the first transcription
 | **Custom API** | Any OpenAI-compatible endpoint: server URL, model, and an optional key (`CUSTOM_API_KEY`). Examples: `https://openrouter.ai/api/v1`, LM Studio `http://localhost:1234/v1`. |
 | **DeepL** | Paste a [DeepL API key](https://www.deepl.com/pro-api) (the Free plan works), or set `DEEPL_API_KEY`. Supports only DeepL's languages; use an LLM translator for the rest. |
 
-Keys you enter in the app are stored in the system keychain: Credential Manager on Windows, Keychain on macOS, and Secret Service (GNOME Keyring or KWallet) on Linux. They are never written to the project folder.
+Keys you enter in the app are stored in the system keychain: Credential Manager on Windows, Keychain on macOS, and Secret Service (GNOME Keyring or KWallet) on Linux. They are not stored in `config.json` or anywhere else in the project folder.
 
 ## Usage
 
 ### GUI
 
-1. **Add files**: drag them onto the window or use **Add files…**. You can add video, audio, an existing `.srt` file (translated without transcription), or a whole folder. Hover over a file name to see its full path.
+1. **Add files**: drag them onto the window or use **Add files…**. You can add video, audio, or an existing `.srt` file (translated without transcription). Dragging a folder adds all supported files in it. Hover over a file name to see its full path.
 2. Choose the **spoken language** (auto-detect by default) and the **model**. `large-v3` is the most accurate; `large-v3-turbo` is several times faster. If the selected language clearly doesn't match the recording, the detected language is used and the log says so.
 3. Optionally pick **target languages** and a translator. For API translators, the model list fills in from your account once the key is entered. Use **Other languages** for anything not in the list (LLM translators only).
 4. Optionally add **context**: topic, proper names, a glossary, or a rule such as *keep the brand name untranslated*.
@@ -126,7 +126,7 @@ In Premiere Pro: **File → Import**, select the `.srt` and drag it onto the tim
 | *GPU failed … falling back to CPU* | Update the NVIDIA driver. Transcription still works on the CPU, just more slowly. |
 | *Claude CLI: Failed to authenticate* | Run `claude` in a terminal and sign in with `/login`. |
 | Ollama translation is very slow | Choose a smaller model that fits in your GPU memory (e.g. 7–14B parameters). |
-| *No system keychain available* (Linux) | Install and unlock GNOME Keyring or KWallet, or set `ANTHROPIC_API_KEY` / `DEEPL_API_KEY`. |
+| *No system keychain available* (Linux) | Install and unlock GNOME Keyring or KWallet, or set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `CUSTOM_API_KEY` or `DEEPL_API_KEY`. |
 | `setup` cannot find Python | Install Python 3.10–3.13. Newer versions may not have every dependency yet. |
 
 Settings (without keys) are saved in `config.json` in the project folder.
