@@ -417,7 +417,7 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
 
         self.other = ctk.CTkEntry(c, placeholder_text=t("other_langs"))
         self._on_edit(self.other, self._autosave)
-        if self.cfg.get("other"):
+        if self._other_value(self.cfg.get("other", "")):
             self.other.insert(0, self.cfg["other"])
         self.other.grid(row=6, column=0, columnspan=3, sticky="ew", padx=18, pady=(12, 4))
 
@@ -450,7 +450,9 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         """DeepL tłumaczy tylko na swoje języki: reszta listy i pole „Inne języki” są wtedy nieaktywne."""
         deepl = self.engine_code == "deepl"
         self.check_grid.set_disabled([c for c, (_, _, d) in core.LANGUAGES.items() if deepl and not d])
-        self.other.configure(state="disabled" if deepl else "normal", text_color=MUTED if deepl else TEXT,
+        # „readonly”, nie „disabled”: kliknięcie zablokowanego pola w CTkEntry zamieniałoby tekst podpowiedzi
+        # w „wpisaną” wartość (nie da się go wtedy skasować)
+        self.other.configure(state="readonly" if deepl else "normal",
                              fg_color=CONTROL if deepl else ("#FFFFFF", "#191B1F"))
 
     def _build_fields(self):
@@ -642,15 +644,22 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         speech = self.speech_map[self.speech.get()]
         self.cfg.update(
             speech=speech or "auto", model=self.model.get(), engine=self.engine_code,
-            targets=[c for c, v in self.targets.items() if v.get()], other=self.other.get().strip(),
+            targets=[c for c, v in self.targets.items() if v.get()], other=self._other_value(self.other.get()),
             chars=int(self.chars.get()), lines=int(self.lines.get()),
             context=self.context.get("1.0", "end").strip(),
         )
 
+    @staticmethod
+    def _other_value(text):
+        """Wpisane „Inne języki” — bez tekstu podpowiedzi, gdyby kiedyś trafił do pola lub ustawień."""
+        text = text.strip()
+        hints = [v for k in ("other_langs",) for v in i18n.S[k]] + ["Inne języki (tylko Claude)", "Other languages (Claude only)"]
+        return "" if any(text.startswith(h.split(",")[0]) for h in hints) else text
+
     def _targets(self):
         chosen = [c for c, v in self.targets.items() if v.get() and c not in self.check_grid.disabled]
         if self.engine_code != "deepl":
-            chosen += [core.resolve_language(x) for x in self.other.get().split(",") if x.strip()]
+            chosen += [core.resolve_language(x) for x in self._other_value(self.other.get()).split(",") if x.strip()]
         return tuple(dict.fromkeys(chosen))
 
     def start(self):
