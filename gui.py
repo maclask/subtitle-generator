@@ -611,41 +611,54 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
     def _render_files(self):
         """Lista plików: najwyżej FILES_VISIBLE wierszy, przy dłuższej liście pasek przewijania i kółko myszy.
 
-        (CTkScrollableFrame nie schodzi poniżej ~200 px wysokości, więc przewijamy „okno” na liście.)"""
+        (CTkScrollableFrame nie schodzi poniżej ~200 px wysokości, więc przewijamy „okno” na liście.)
+        Wiersze tworzymy raz — przewijanie zmienia tylko ich treść, więc nic nie miga."""
+        n, vis = len(self.paths), self.FILES_VISIBLE
+        rows, scroll = min(n, vis), n > vis
+        if getattr(self, "_file_layout", None) != (rows, scroll) or not self.file_list.winfo_children():
+            self._build_file_rows(rows, scroll)
+        self.file_start = max(0, min(getattr(self, "file_start", 0), n - vis))
+        self._fill_file_rows()
+
+    def _build_file_rows(self, rows, scroll):
         for w in self.file_list.winfo_children():
             w.destroy()
-        if not self.paths:
+        self._file_layout, self._file_rows, self._file_bar = (rows, scroll), [], None
+        if not rows:
             ctk.CTkLabel(self.file_list, text=t("files_empty_dnd" if self.dnd else "files_empty"),
-                         text_color=MUTED, font=font(12)).grid(
-                row=0, column=0, pady=22)
+                         text_color=MUTED, font=font(12)).grid(row=0, column=0, pady=22)
             return
-        n, vis = len(self.paths), self.FILES_VISIBLE
-        self.file_start = max(0, min(getattr(self, "file_start", 0), n - vis))
-        shown = self.paths[self.file_start:self.file_start + vis]
-        last = len(shown) - 1
-        for i, p in enumerate(shown):
-            pad = (8 if i == 0 else 0, 8 if i == last else 0)
+        for i in range(rows):
+            pad = (8 if i == 0 else 0, 8 if i == rows - 1 else 0)
+            name = ctk.CTkLabel(self.file_list, text="", anchor="w")
+            name.grid(row=i, column=0, sticky="ew", padx=(14, 0), pady=pad)
+            kind = ctk.CTkLabel(self.file_list, text="", text_color=MUTED, font=font(12), width=50)
+            kind.grid(row=i, column=1, pady=pad)
+            remove = ctk.CTkButton(self.file_list, text="✕", width=28, height=24, fg_color="transparent",
+                                   text_color=MUTED, hover_color=CONTROL_HOVER)
+            remove.grid(row=i, column=2, padx=(0, 6), pady=pad)
+            for w in (name, kind, remove):
+                self._bind_wheel(w)
+            self._file_rows.append((name, kind, remove, Tooltip(name, "")))
+        if scroll:
+            self._file_bar = ctk.CTkScrollbar(self.file_list, command=self._scroll_files,
+                                              button_color=CONTROL_HOVER, button_hover_color=BORDER)
+            self._file_bar.grid(row=0, column=3, rowspan=rows, sticky="ns", padx=(0, 4), pady=6)
+        self._bind_wheel(self.file_list)
+
+    def _fill_file_rows(self):
+        shown = self.paths[self.file_start:self.file_start + len(self._file_rows)]
+        for (name, kind, remove, tip), p in zip(self._file_rows, shown):
             base = os.path.basename(p)
             if len(base) > 44:  # długą nazwę skracamy w środku — pełna ścieżka jest w dymku
                 base = base[:22] + "…" + base[-21:]
-            name = ctk.CTkLabel(self.file_list, text=base, anchor="w")
-            name.grid(row=i, column=0, sticky="ew", padx=(14, 0), pady=pad)
-            Tooltip(name, os.path.normpath(p))
-            kind = ctk.CTkLabel(self.file_list, text="SRT" if p.lower().endswith(".srt") else "media",
-                                text_color=MUTED, font=font(12), width=50)
-            kind.grid(row=i, column=1, pady=pad)
-            ctk.CTkButton(self.file_list, text="✕", width=28, height=24, fg_color="transparent",
-                          text_color=MUTED, hover_color=CONTROL_HOVER,
-                          command=lambda p=p: (self.paths.remove(p), self._render_files())).grid(
-                row=i, column=2, padx=(0, 6), pady=pad)
-            for w in (name, kind):
-                self._bind_wheel(w)
-        if n > vis:
-            bar = ctk.CTkScrollbar(self.file_list, command=self._scroll_files, button_color=CONTROL_HOVER,
-                                   button_hover_color=BORDER)
-            bar.grid(row=0, column=3, rowspan=vis, sticky="ns", padx=(0, 4), pady=6)
-            bar.set(self.file_start / n, (self.file_start + vis) / n)
-        self._bind_wheel(self.file_list)
+            name.configure(text=base)
+            kind.configure(text="SRT" if p.lower().endswith(".srt") else "media")
+            remove.configure(command=lambda p=p: (self.paths.remove(p), self._render_files()))
+            tip.text = os.path.normpath(p)
+        if self._file_bar:
+            n = len(self.paths)
+            self._file_bar.set(self.file_start / n, (self.file_start + len(self._file_rows)) / n)
 
     def _bind_wheel(self, widget):
         for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):  # Windows/macOS, Linux
@@ -665,7 +678,7 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         new = max(0, min(new, n - vis))
         if new != old:
             self.file_start = new
-            self._render_files()
+            self._fill_file_rows()
 
     # ------------------------------------------------------------ log / kolejka
 
