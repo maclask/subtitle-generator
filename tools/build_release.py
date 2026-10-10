@@ -40,7 +40,7 @@ def build(name, files, fmt):
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
             for f in files:
                 info = zipfile.ZipInfo(f"{name}/{f}", date_time=(2026, 1, 1, 0, 0, 0))
-                info.external_attr = (0o755 if f.endswith(EXECUTABLE) else 0o644) << 16  # bity uruchamiania (macOS)
+                info.external_attr = (0o100755 if f.endswith(EXECUTABLE) else 0o100644) << 16  # bity uruchamiania (macOS)
                 info.create_system = 3  # Unix — inaczej rozpakowanie ignoruje bity uprawnień
                 info.compress_type = zipfile.ZIP_DEFLATED
                 z.writestr(info, committed(f))
