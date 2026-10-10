@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import textwrap
+import threading
 from dataclasses import dataclass
 
 from i18n import t
@@ -65,6 +66,40 @@ def file_suffix(lang):
     return lang if lang in LANGUAGES else (re.sub(r"\W+", "_", lang.lower()).strip("_") or "xx")
 
 
+# ---------------------------------------------------------------- przerywanie (przycisk Stop)
+
+CANCEL = threading.Event()
+
+
+class Cancelled(Exception):
+    pass
+
+
+def check_cancel():
+    if CANCEL.is_set():
+        raise Cancelled()
+
+
+def _run_proc(cmd, input_text, cwd=None):
+    """subprocess.run, który da się przerwać przyciskiem Stop (zabija proces)."""
+    import subprocess
+
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", cwd=cwd,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    pending = input_text
+    while True:
+        try:
+            out, err = proc.communicate(pending, timeout=0.3)
+            return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+        except subprocess.TimeoutExpired:
+            pending = None  # stdin wysłane przy pierwszym wywołaniu
+            if CANCEL.is_set():
+                proc.kill()
+                proc.communicate()
+                raise Cancelled()
+
+
 @dataclass
 class Cue:
     start: float
@@ -116,10 +151,21 @@ def _run_whisper(path, language, model_name, device, log, progress):
     from faster_whisper import WhisperModel
 
     compute = "float16" if device == "cuda" else "int8"
-    log(t("loading_model", model=model_name, dev="GPU" if device == "cuda" else "CPU"))
+    dev = "GPU" if device == "cuda" else "CPU"
+    log(t("loading_model" if _model_cached(model_name) else "downloading_model", model=model_name, dev=dev))
     model = WhisperModel(model_name, device=device, compute_type=compute)
+    from faster_whisper import decode_audio
+
+    audio = decode_audio(path)
+    check_cancel()
+    if language:
+        # Whisper z wymuszonym złym językiem nie zapisuje mowy, tylko ją (słabo) tłumaczy — sprawdzamy to
+        detected, prob, _ = model.detect_language(audio, vad_filter=True, language_detection_segments=3)
+        if detected != language and prob >= 0.8:
+            log(t("lang_mismatch", chosen=lang_name(language), detected=lang_name(detected), prob=prob))
+            language = detected
     segments, info = model.transcribe(
-        path,
+        audio,
         language=language,
         word_timestamps=True,
         vad_filter=True,
@@ -129,6 +175,7 @@ def _run_whisper(path, language, model_name, device, log, progress):
     log(t("detected", lang=lang_name(info.language), prob=info.language_probability, mins=info.duration / 60))
     words = []
     for seg in segments:
+        check_cancel()
         for w in seg.words or []:
             words.append(Word(w.start, w.end, w.word))
         if info.duration:
@@ -136,11 +183,23 @@ def _run_whisper(path, language, model_name, device, log, progress):
     return words, info.language
 
 
+def _model_cached(model_name):
+    try:
+        from faster_whisper.utils import _MODELS
+        from huggingface_hub import try_to_load_from_cache
+
+        return isinstance(try_to_load_from_cache(_MODELS.get(model_name, model_name), "model.bin"), str)
+    except Exception:
+        return False
+
+
 def transcribe(path, language, model_name, log, progress):
     """Zwraca (lista słów z czasami, wykryty język). Najpierw GPU, w razie błędu CPU."""
     _add_cuda_dll_paths()
     try:
         return _run_whisper(path, language, model_name, "cuda", log, progress)
+    except Cancelled:
+        raise
     except Exception as e:  # brak CUDA/cuDNN, nieobsługiwana karta itp.
         if not any(w in str(e).lower() for w in ("cuda", "cublas", "cudnn", "gpu", "device", "dll", ".so")):
             raise  # np. uszkodzony plik — CPU nic tu nie pomoże
@@ -422,7 +481,6 @@ def _json_payload(text):
 
 
 def _ask_codex(exe, system, user):
-    import subprocess
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -430,11 +488,10 @@ def _ask_codex(exe, system, user):
         out = os.path.join(tmp, "out.json")
         with open(schema, "w", encoding="utf-8") as f:
             json.dump(SCHEMA, f)
-        proc = subprocess.run(
+        proc = _run_proc(
             [exe, "exec", "-", "--output-schema", schema, "-o", out, "--skip-git-repo-check",
              "--sandbox", "read-only", "--ephemeral"],
-            input=system + "\n\n" + user, capture_output=True, text=True, encoding="utf-8", cwd=tmp,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            system + "\n\n" + user, cwd=tmp,
         )
         if proc.returncode != 0 or not os.path.exists(out):
             raise RuntimeError(t("codex_error", err=(proc.stderr or proc.stdout).strip()[-500:]))
@@ -462,6 +519,7 @@ def _translate_llm(cues, src, tgt, context, log, ask, chunk=80):
     out = [Cue(c.start, c.end, c.text) for c in cues]
 
     for start in range(0, len(cues), chunk):
+        check_cancel()
         batch = {i: cues[i].text for i in range(start, min(start + chunk, len(cues)))}
         if len(cues) > chunk:
             log(t("chunk", a=start + 1, b=start + len(batch)))
@@ -489,14 +547,11 @@ def _translate_llm(cues, src, tgt, context, log, ask, chunk=80):
 
 
 def _ask_cli(exe, system, user):
-    import subprocess
-
-    proc = subprocess.run(
+    proc = _run_proc(
         [exe, "-p", "Translate the subtitle cues given on stdin, following the system prompt.",
          "--output-format", "json", "--json-schema", json.dumps(SCHEMA),
          "--system-prompt", system, "--tools", ""],
-        input=user, capture_output=True, text=True, encoding="utf-8",
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        user,
     )
     try:
         data = json.loads(proc.stdout)
@@ -541,6 +596,7 @@ def _translate_deepl(cues, src, tgt, context, key, chunk=50):
     tr = deepl.Translator(key)
     out = []
     for start in range(0, len(cues), chunk):
+        check_cancel()
         batch = cues[start:start + chunk]
         # kontekst nie jest tłumaczony ani liczony do limitu znaków
         near = " ".join(c.text for c in cues[max(0, start - 5):start + chunk + 5])
@@ -694,7 +750,7 @@ class Options:
     settings: dict | None = None          # modele / adresy silników LLM (openai_model, custom_url…)
 
 
-def process_file(path, o, log, progress=lambda v: None):
+def process_file(path, o, log, progress=lambda v: None, saved=lambda path: None):
     """Wideo/audio → SRT (+ tłumaczenia). Plik .srt → tylko tłumaczenia. Zwraca listę zapisanych plików."""
     keys = o.keys or {}
     folder = o.out_dir or os.path.dirname(os.path.abspath(path))
@@ -718,15 +774,18 @@ def process_file(path, o, log, progress=lambda v: None):
         out = os.path.join(folder, f"{name}.{src}.srt")
         write_srt(cues, out, o.chars)
         written.append(out)
+        saved(out)
         log(t("saved_n", path=out, n=len(cues)))
 
     for tgt in o.targets:
         if tgt == src:
             continue
+        check_cancel()
         translated = translate(cues, src, tgt, o.engine, o.context, log, keys, o.settings)
         out = os.path.join(folder, f"{name}.{file_suffix(tgt)}.srt")
         write_srt(translated, out, o.chars)
         written.append(out)
+        saved(out)
         log(t("saved", path=out))
     progress(1.0)
     return written

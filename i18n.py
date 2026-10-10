@@ -6,10 +6,16 @@ LANG = "pl"
 
 S = {
     # --- core: rozpoznawanie mowy
-    "loading_model": ("Ładuję model {model} ({dev})… pierwsze uruchomienie pobiera model, to może potrwać.",
-                      "Loading model {model} ({dev})… the first run downloads the model, this may take a while."),
+    "loading_model": ("Ładuję model {model} ({dev})…", "Loading model {model} ({dev})…"),
+    "downloading_model": ("Pobieram model {model} — tylko za pierwszym razem, to może potrwać kilka minut…",
+                          "Downloading model {model} — first time only, this may take a few minutes…"),
     "detected": ("Język mowy: {lang} (pewność {prob:.0%}), długość {mins:.1f} min",
                  "Spoken language: {lang} (confidence {prob:.0%}), duration {mins:.1f} min"),
+    "lang_mismatch": ("UWAGA: wybrano język „{chosen}”, ale w nagraniu słychać „{detected}” (pewność {prob:.0%}). "
+                      "Zapisuję w języku „{detected}” — z wymuszonym złym językiem Whisper tłumaczyłby mowę zamiast ją zapisać.",
+                      "WARNING: “{chosen}” was selected, but the recording sounds like “{detected}” ({prob:.0%} confidence). "
+                      "Transcribing in “{detected}” — with the wrong language forced, Whisper would translate the speech "
+                      "instead of transcribing it."),
     "gpu_failed": ("GPU nie zadziałało ({err}). Przełączam na CPU — będzie wolniej.",
                    "GPU failed ({err}). Falling back to CPU — this will be slower."),
     "no_speech": ("Nie rozpoznano mowy.", "No speech detected."),
@@ -80,6 +86,10 @@ S = {
     "engine": ("Silnik", "Engine"),
     "checking": ("Sprawdzam…", "Checking…"),
     "generate": ("Generuj napisy", "Generate subtitles"),
+    "stop": ("Zatrzymaj", "Stop"),
+    "stopping": ("Zatrzymuję…", "Stopping…"),
+    "cancelled": ("Przerwano.", "Cancelled."),
+    "open_folder": ("Otwórz folder", "Open folder"),
     "working": ("Pracuję…", "Working…"),
     "add_first": ("Dodaj najpierw plik.", "Add a file first."),
     "done": ("Gotowe.", "Done."),

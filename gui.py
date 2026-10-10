@@ -2,6 +2,7 @@
 import os
 import queue
 import threading
+import tkinter as tk
 import traceback
 from tkinter import filedialog
 from tkinter import font as tkfont
@@ -27,9 +28,15 @@ CONTROL_HOVER = ("#E4E7EB", "#323741")
 SELECTED = ("#FFFFFF", "#3C424C")
 BORDER = ("#D5D9DF", "#3B4049")
 CHECK_BORDER = ("#C3C8D0", "#4A505A")
+DANGER = ("#D93636", "#E5484D")
+DANGER_HOVER = ("#B92C2C", "#CE3B40")
 
 
 def apply_theme(root):
+    # zaokrąglenia rysowane wielokątami są ~20% szybsze od domyślnych „font_shapes” przy zmianie rozmiaru okna
+    from customtkinter.windows.widgets.core_rendering import DrawEngine
+
+    DrawEngine.preferred_drawing_method = "polygon_shapes"
     th = ctk.ThemeManager.theme
     th["CTkFont"]["family"] = tkfont.nametofont("TkDefaultFont", root).actual("family")  # Segoe UI / SF / Cantarell…
     th["CTk"]["fg_color"] = BG
@@ -71,6 +78,67 @@ UI_LANGS = {"PL": "pl", "EN": "en"}
 LABEL_COL = 140  # szerokość kolumny etykiet w karcie tłumaczenia
 
 
+def mode_color(pair):
+    return pair[1] if ctk.get_appearance_mode() == "Dark" else pair[0]
+
+
+class CheckGrid(tk.Canvas):
+    """Siatka pól wyboru narysowana na jednej kanwie.
+
+    32 osobne CTkCheckBoxy to 32 kanwy przerysowywane przy każdej zmianie rozmiaru okna — główne źródło
+    lagowania. Tu jest jedna kanwa, która przy zmianie rozmiaru nic nie przerysowuje."""
+
+    def __init__(self, master, items, variables, columns=4):
+        super().__init__(master, highlightthickness=0, bd=0, cursor="hand2")
+        self.items, self.vars, self.columns = items, variables, columns
+        self.scale = ctk.ScalingTracker.get_widget_scaling(master)
+        family = ctk.ThemeManager.theme["CTkFont"]["family"]
+        self.font = tkfont.Font(family=family, size=-round(13 * self.scale))
+        for v in variables.values():
+            v.trace_add("write", lambda *_: self.draw())
+        self.mode = None
+        self.draw()
+
+    def draw(self):
+        sc, self.mode = self.scale, ctk.get_appearance_mode()
+        self.delete("all")
+        self.configure(bg=mode_color(INSET))
+        box, gap, pad_x, row_h = round(18 * sc), round(9 * sc), round(12 * sc), round(26 * sc)
+        col_w = max(self.font.measure(text) for _, text in self.items) + box + gap + pad_x
+        rows = -(-len(self.items) // self.columns)
+        top = round(8 * sc)
+        for i, (code, text) in enumerate(self.items):
+            x = pad_x + (i % self.columns) * col_w
+            y = top + (i // self.columns) * row_h
+            on = self.vars[code].get()
+            tag = f"item_{code}"
+            self._rounded(x, y + (row_h - box) / 2, box, round(5 * sc),
+                          fill=mode_color(ACCENT) if on else mode_color(INSET),
+                          outline=mode_color(ACCENT) if on else mode_color(CHECK_BORDER), width=max(1, round(1.5 * sc)),
+                          tags=tag)
+            if on:
+                cy = y + row_h / 2
+                self.create_line(x + box * .25, cy, x + box * .43, cy + box * .18, x + box * .76, cy - box * .2,
+                                 fill="#FFFFFF", width=max(2, round(2 * sc)), capstyle="round", joinstyle="round",
+                                 tags=tag)
+            self.create_text(x + box + gap, y + row_h / 2, text=text, anchor="w", font=self.font,
+                             fill=mode_color(TEXT), tags=tag)
+            # niewidoczny prostokąt — klikalny cały wiersz, nie tylko litery
+            self.create_rectangle(x - 4, y, x + col_w - pad_x, y + row_h, outline="", fill="", tags=tag)
+            self.tag_bind(tag, "<Button-1>", lambda _, c=code: self.vars[c].set(not self.vars[c].get()))
+        self.configure(width=self.columns * col_w + pad_x, height=rows * row_h + 2 * top)
+
+    def _rounded(self, x, y, size, r, **kw):
+        x2, y2 = x + size, y + size
+        pts = [x + r, y, x2 - r, y, x2, y, x2, y + r, x2, y2 - r, x2, y2, x2 - r, y2, x + r, y2, x, y2, x, y2 - r,
+               x, y + r, x, y]
+        self.create_polygon(pts, smooth=True, **kw)
+
+    def sync_mode(self):
+        if ctk.get_appearance_mode() != self.mode:
+            self.draw()
+
+
 class Card(ctk.CTkFrame):
     """Sekcja z tytułem."""
 
@@ -92,6 +160,8 @@ class App(ctk.CTk):
         i18n.set_lang(self.cfg.get("ui_lang"))
         self.keys = core.api_keys(self.cfg)
         self.paths = []
+        self.running = False
+        self.last_output = None
         self.engine_code = self.cfg.get("engine", "cli")
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -137,11 +207,15 @@ class App(ctk.CTk):
         bottom = ctk.CTkFrame(b, fg_color="transparent")
         bottom.grid(row=2, column=0, columnspan=2, sticky="ew", padx=24, pady=(14, 18))
         bottom.grid_columnconfigure(0, weight=1)
-        self.go = ctk.CTkButton(bottom, text=t("generate"), height=42, font=font(15, "bold"), command=self.start)
+        self.go = ctk.CTkButton(bottom, text="", height=42, font=font(15, "bold"), command=self.on_go)
         self.go.grid(row=0, column=0, sticky="ew")
+        self.open_btn = self._secondary(bottom, t("open_folder"), self.open_folder, width=150)
+        self.open_btn.configure(height=42)
+        self.open_btn.grid(row=0, column=1, padx=(10, 0))
         self.bar = ctk.CTkProgressBar(bottom, height=6)
         self.bar.set(0)
-        self.bar.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        self.bar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        self._set_running(self.running)
 
         self._render_files()
         self.refresh_info()
@@ -223,18 +297,16 @@ class App(ctk.CTk):
         ctk.CTkLabel(c, text=t("translate_to"), font=font(13, "bold")).grid(
             row=4, column=0, columnspan=3, sticky="w", padx=18, pady=(4, 6))
         grid = ctk.CTkFrame(c, corner_radius=8)
-        grid.grid(row=5, column=0, columnspan=3, sticky="nsew", padx=18)
-        grid.grid_columnconfigure((0, 1, 2, 3), weight=1, uniform="lang")
-        c.grid_rowconfigure(5, weight=1)
+        grid.grid(row=5, column=0, columnspan=3, sticky="ew", padx=18)
+        grid.grid_anchor("nw")
+        c.grid_rowconfigure(8, weight=1)  # wolne miejsce dostaje pole kontekstu
         self.targets = {}
         chosen = set(self.cfg.get("targets", []))
         langs = sorted(core.LANGUAGES, key=lambda code: (code not in ("pl", "en", "de"), core.lang_name(code)))
-        for i, code in enumerate(langs):
-            v = ctk.BooleanVar(value=code in chosen)
-            ctk.CTkCheckBox(grid, text=core.lang_name(code), variable=v, checkbox_width=18, checkbox_height=18,
-                            font=font(13)).grid(row=i // 4, column=i % 4, sticky="w", padx=12,
-                                                pady=(10 if i < 4 else 3, 10 if i >= len(langs) - 4 else 3))
-            self.targets[code] = v
+        for code in langs:
+            self.targets[code] = tk.BooleanVar(value=code in chosen)
+        self.check_grid = CheckGrid(grid, [(code, core.lang_name(code)) for code in langs], self.targets)
+        self.check_grid.grid(row=0, column=0, sticky="nw", padx=6, pady=6)
 
         self.other = ctk.CTkEntry(c, placeholder_text=t("other_langs"))
         if self.cfg.get("other"):
@@ -243,9 +315,9 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(c, text=t("context"), text_color=MUTED, font=font(12)).grid(
             row=7, column=0, columnspan=3, sticky="w", padx=18, pady=(10, 4))
-        self.context = ctk.CTkTextbox(c, height=70)
+        self.context = ctk.CTkTextbox(c, height=70, activate_scrollbars=False)  # mniej kanw = płynniejsza zmiana rozmiaru
         self.context.insert("1.0", self.cfg.get("context", ""))
-        self.context.grid(row=8, column=0, columnspan=3, sticky="ew", padx=18, pady=(0, 16))
+        self.context.grid(row=8, column=0, columnspan=3, sticky="nsew", padx=18, pady=(0, 16))
         self._build_fields()
         return c
 
@@ -292,6 +364,10 @@ class App(ctk.CTk):
             self._on_edit(self.key, self._store_key)
             ctk.CTkLabel(self.fields, text=label).grid(row=row, column=0, sticky="w", padx=16, pady=5)
             self.key.grid(row=row, column=1, sticky="ew", padx=(10, 18), pady=5)
+        if self.fields.winfo_children():  # pusta ramka CTk zachowałaby domyślne 200 px wysokości
+            self.fields.grid()
+        else:
+            self.fields.grid_remove()
         if engine == "ollama" and not self.cfg.get("ollama_model"):
             self._store_settings()  # zapamiętaj pierwszy zainstalowany model jako domyślny
 
@@ -369,6 +445,7 @@ class App(ctk.CTk):
         self.q.put(("log", msg))
 
     def poll(self):
+        self.check_grid.sync_mode()  # przełączenie jasny/ciemny w systemie
         while not self.q.empty():
             kind, val = self.q.get()
             if kind == "log":
@@ -381,8 +458,11 @@ class App(ctk.CTk):
             elif kind == "info" and val[0] == self.info_id:  # starsze, wolniejsze odpowiedzi pomijamy
                 self.stt_info.configure(text=val[1])
                 self.tr_info.configure(text=val[2])
+            elif kind == "output":
+                self.last_output = val
+                self.open_btn.configure(state="normal")
             elif kind == "done":
-                self.go.configure(state="normal", text=t("generate"))
+                self._set_running(False)
         self.after(100, self.poll)
 
     # ------------------------------------------------------------ praca
@@ -413,16 +493,50 @@ class App(ctk.CTk):
             engine=self.engine_code, context=self.cfg["context"], chars=self.cfg["chars"],
             lines=self.cfg["lines"], keys=dict(self.keys), settings=dict(self.cfg),
         )
-        self.go.configure(state="disabled", text=t("working"))
+        core.CANCEL.clear()
+        self._set_running(True)
         threading.Thread(target=self.work, args=(list(self.paths), opts), daemon=True).start()
+
+    def on_go(self):
+        if not self.running:
+            self.start()
+        elif not core.CANCEL.is_set():
+            core.CANCEL.set()  # wątek pracy zatrzyma się w najbliższym punkcie kontrolnym
+            self.go.configure(text=t("stopping"), state="disabled")
+
+    def _set_running(self, running):
+        self.running = running
+        if running:
+            self.go.configure(text=t("stop"), state="normal", fg_color=DANGER, hover_color=DANGER_HOVER)
+        else:
+            self.go.configure(text=t("generate"), state="normal", fg_color=ACCENT, hover_color=ACCENT_HOVER)
+        self.open_btn.configure(state="normal" if self.last_output else "disabled")
+
+    def open_folder(self):
+        """Otwiera folder z ostatnio zapisanym plikiem (i zaznacza go, gdzie się da)."""
+        import subprocess
+        import sys
+
+        path = self.last_output
+        if not path or not os.path.exists(path):
+            return
+        if sys.platform == "win32":
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", path])
+        else:
+            subprocess.Popen(["xdg-open", os.path.dirname(path)])
 
     def work(self, files, opts):
         try:
             for path in files:
                 self.log(f"=== {os.path.basename(path)}")
                 self.q.put(("progress", 0))
-                core.process_file(path, opts, self.log, lambda v: self.q.put(("progress", v)))
+                core.process_file(path, opts, self.log, lambda v: self.q.put(("progress", v)),
+                                  saved=lambda out: self.q.put(("output", out)))
             self.log(t("done"))
+        except core.Cancelled:
+            self.log(t("cancelled"))
         except Exception as e:
             self.log(t("error", err=e))
             self.log(traceback.format_exc())
