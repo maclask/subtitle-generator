@@ -1,0 +1,9 @@
+faster-whisper==1.2.1
+ctranslate2==4.8.2
+av==18.1.0
+nvidia-cublas-cu12==12.9.2.10; sys_platform != "darwin"
+nvidia-cudnn-cu12==9.27.0.42; sys_platform != "darwin"
+anthropic>=1.13,<2
+deepl>=1.32,<2
+openai>=1.100,<3
+keyring>=25,<26

@@ -21,17 +21,27 @@ The files work in Premiere Pro, DaVinci Resolve, Final Cut Pro, YouTube and othe
 
 ## Installation
 
+Download the package for your system from [Releases](https://github.com/maclask/subtitle-generator/releases/latest):
+
+| | GUI + command line | Command line only |
+|---|---|---|
+| Windows | `subtitle-generator-<version>-windows.zip` | `subtitle-generator-cli-<version>-windows.zip` |
+| macOS | `subtitle-generator-<version>-macos.zip` | `subtitle-generator-cli-<version>-macos.zip` |
+| Linux | `subtitle-generator-<version>-linux.tar.gz` | `subtitle-generator-cli-<version>-linux.tar.gz` |
+
+The command-line package doesn't need tkinter, which makes it a good fit for servers.
+
 ### Windows
 
 1. Install Python 3.13 from [python.org](https://www.python.org/downloads/). Keep the **py launcher** option enabled in the installer.
-2. Download and unpack the latest release, or run `git clone https://github.com/maclask/subtitle-generator`.
+2. Unpack the Windows package, or run `git clone https://github.com/maclask/subtitle-generator`.
 3. Double-click **`setup.bat`**. It creates a local environment in `.venv` and installs dependencies. This takes a few minutes.
-4. Start the app with **`generator.bat`**.
+4. Start the app with **`generator.bat`**, or use `generator-cli.bat` for the command line.
 
 ### macOS
 
 1. Install Python 3.13 from [python.org](https://www.python.org/downloads/), which includes tkinter. With Homebrew, run `brew install python@3.13 python-tk@3.13` instead.
-2. Download and unpack the latest release, or clone the repository.
+2. Unpack the macOS package, or clone the repository.
 3. In Terminal, in the project folder, run:
    ```sh
    sh setup.sh
@@ -47,7 +57,7 @@ The files work in Premiere Pro, DaVinci Resolve, Final Cut Pro, YouTube and othe
    sudo apt install python3 python3-tk python3-venv   # Debian / Ubuntu
    sudo dnf install python3 python3-tkinter          # Fedora
    ```
-2. Download and unpack the latest release, or clone the repository.
+2. Unpack the Linux package (`tar xzf subtitle-generator-*-linux.tar.gz`), or clone the repository.
 3. In the project folder, run:
    ```sh
    sh setup.sh
@@ -119,3 +129,7 @@ In Premiere Pro: **File → Import**, select the `.srt` and drag it onto the tim
 | `setup` cannot find Python | Install Python 3.10–3.13. Newer versions may not have every dependency yet. |
 
 Settings (without keys) are saved in `config.json` in the project folder.
+
+## License
+
+[GPL-3.0](LICENSE)

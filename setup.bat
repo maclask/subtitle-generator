@@ -16,9 +16,11 @@ if not defined PY (
 echo Using: %PY%
 %PY% -m venv --clear .venv || goto :fail
 .venv\Scripts\python -m pip install --upgrade pip || goto :fail
-.venv\Scripts\python -m pip install -r requirements.txt || goto :fail
+set REQ=requirements-cli.txt
+if exist gui.py set REQ=requirements.txt
+.venv\Scripts\python -m pip install -r %REQ% || goto :fail
 echo.
-echo Done. GUI: generator.bat    Command line: generator-cli.bat --help
+if exist gui.py (echo Done. GUI: generator.bat    Command line: generator-cli.bat --help) else (echo Done. Command line: generator-cli.bat --help)
 pause
 exit /b 0
 
