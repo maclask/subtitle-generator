@@ -356,6 +356,8 @@ def read_srt(path):
 
 # ---------------------------------------------------------------- tłumaczenie
 
+CLAUDE_MODEL = "claude-opus-5-5"  # domyślny model Claude API
+
 ENGINES = {
     "cli": "Claude CLI",
     "api": "Claude API",
@@ -366,10 +368,9 @@ ENGINES = {
     "deepl": "DeepL",
 }
 # pola wymagane przez silnik (poza kluczem): model / adres serwera
-ENGINE_FIELDS = {"openai": ("model",), "ollama": ("model",), "custom": ("url", "model")}
+ENGINE_FIELDS = {"api": ("model",), "openai": ("model",), "ollama": ("model",), "custom": ("url", "model")}
 ENGINE_KEY = {"api": "anthropic", "openai": "openai", "custom": "custom", "deepl": "deepl"}
-DEFAULTS = {"openai_model": "gpt-5", "ollama_url": "http://localhost:11434/v1", "custom_url": "", "custom_model": ""}
-CLAUDE_MODEL = "claude-opus-5-5"
+DEFAULTS = {"api_model": CLAUDE_MODEL, "openai_model": "gpt-5", "ollama_url": "http://localhost:11434/v1", "custom_url": "", "custom_model": ""}
 
 SCHEMA = {
     "type": "object",
@@ -443,7 +444,8 @@ def translate(cues, src, tgt, engine, context, log, keys, settings=None):
         import anthropic
 
         client = anthropic.Anthropic(api_key=keys.get("anthropic") or None)
-        ask = lambda system, user: _ask_api(client, system, user)
+        model = engine_setting(settings, "api", "model")
+        ask = lambda system, user: _ask_api(client, model, system, user)
     elif engine == "codex":
         exe = _find_exe("codex", t("codex_missing"))
         ask = lambda system, user: _ask_codex(exe, system, user)
@@ -566,16 +568,23 @@ def _ask_cli(exe, system, user):
     return result["translations"]
 
 
-def _ask_api(client, system, user):
-    resp = client.beta.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=16000,
-        betas=["server-side-fallback-2026-07-01"],
-        output_config={"effort": "medium", "format": {"type": "json_schema", "schema": SCHEMA}},
-        system=system,
-        messages=[{"role": "user", "content": user}],
-        extra_body={"fallbacks": "default"},
-    )
+def _ask_api(client, model, system, user):
+    import anthropic
+
+    fmt = {"type": "json_schema", "schema": SCHEMA}
+    messages = [{"role": "user", "content": user}]
+    try:
+        # pełna wersja: poziom wysiłku + automatyczny model zapasowy przy odmowie
+        resp = client.beta.messages.create(
+            model=model, max_tokens=16000, system=system, messages=messages,
+            betas=["server-side-fallback-2026-07-01"],
+            output_config={"effort": "medium", "format": fmt},
+            extra_body={"fallbacks": "default"},
+        )
+    except anthropic.BadRequestError:
+        # starszy / inny model nie obsługuje effort albo fallbacks — samo structured output
+        resp = client.messages.create(model=model, max_tokens=16000, system=system, messages=messages,
+                                      output_config={"format": fmt})
     if resp.stop_reason == "refusal":
         raise RuntimeError(t("refusal"))
     if resp.stop_reason == "max_tokens":
@@ -626,7 +635,7 @@ def engine_info(engine, keys, settings=None):
     except Exception as e:
         return f"{ENGINES[engine]} — {t('unavailable')} ({e})"
     if engine == "api":
-        return f"Claude API · {CLAUDE_MODEL}" + ("" if keys.get("anthropic") else no_key)
+        return f"Claude API · {engine_setting(settings, 'api', 'model')}" + ("" if keys.get("anthropic") else no_key)
     if engine == "openai":
         return f"OpenAI API · {engine_setting(settings, 'openai', 'model')}" + ("" if keys.get("openai") else no_key)
     if engine in ("ollama", "custom"):
@@ -635,6 +644,39 @@ def engine_info(engine, keys, settings=None):
     if not keys.get("deepl"):
         return "DeepL API" + no_key
     return "DeepL API " + ("Free" if keys["deepl"].endswith(":fx") else "Pro")
+
+
+_OPENAI_SKIP = ("audio", "realtime", "transcribe", "tts", "image", "embedding", "moderation", "search", "whisper",
+                "dall-e", "codex-mini", "computer-use")
+
+
+def list_models(engine, keys, settings=None):
+    """Modele dostępne dla klucza / serwera (pusta lista, gdy się nie da — pole zostaje do wpisania ręcznie)."""
+    try:
+        if engine == "api":
+            import anthropic
+
+            if not keys.get("anthropic"):
+                return []
+            client = anthropic.Anthropic(api_key=keys["anthropic"], timeout=15, max_retries=0)
+            return [m.id for m in client.models.list()]  # najnowsze najpierw
+        if engine == "ollama":
+            return ollama_models(engine_setting(settings, "ollama", "url"))
+        if engine in ("openai", "custom"):
+            import openai
+
+            url = None if engine == "openai" else engine_setting(settings, "custom", "url")
+            key = keys.get("openai") if engine == "openai" else (keys.get("custom") or "none")
+            if (engine == "openai" and not key) or (engine == "custom" and not url):
+                return []
+            ids = sorted(m.id for m in openai.OpenAI(api_key=key, base_url=url, timeout=15, max_retries=0).models.list())
+            if engine == "openai":  # tylko modele czatu
+                ids = [i for i in ids if i.startswith(("gpt-", "o1", "o3", "o4", "chatgpt"))
+                       and not any(x in i for x in _OPENAI_SKIP)]
+            return ids
+    except Exception:
+        pass
+    return []
 
 
 def ollama_models(url=DEFAULTS["ollama_url"]):

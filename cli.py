@@ -24,7 +24,7 @@ i18n.S.update({
                     "target languages, comma-separated, e.g. pl,de,catalan"),
     "a_engine": ("tłumacz: cli, api (Claude API), codex, openai, ollama, custom (API zgodne z OpenAI), deepl",
                  "translator: cli, api (Claude API), codex, openai, ollama, custom (OpenAI-compatible API), deepl"),
-    "a_llm_model": ("model dla openai / ollama / custom", "model for openai / ollama / custom"),
+    "a_llm_model": ("model dla api / openai / ollama / custom", "model for api / openai / ollama / custom"),
     "a_llm_url": ("adres serwera dla ollama / custom", "server URL for ollama / custom"),
     "a_model": ("model Whisper", "Whisper model"),
     "a_context": ("kontekst dla tłumacza (temat, nazwy, słownik)", "context for the translator (topic, names, glossary)"),

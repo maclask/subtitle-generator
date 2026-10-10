@@ -84,11 +84,11 @@ Klucze wpisane w programie trafiają do systemowego magazynu haseł: na Windows 
 
 ### GUI
 
-1. **Dodaj pliki**: wideo, audio albo gotowy plik `.srt`, żeby go przetłumaczyć bez transkrypcji.
-2. Wybierz **język mowy** (lub wykrywanie automatyczne) i **model**. `large-v3` jest najdokładniejszy, `large-v3-turbo` kilka razy szybszy.
-3. Opcjonalnie zaznacz **języki docelowe** i wybierz tłumacza. Języki spoza listy wpisz w pole **Inne języki** (tylko Claude).
+1. **Dodaj pliki**: przeciągnij je na okno albo użyj **Dodaj pliki…**. Możesz dodać wideo, audio, gotowy plik `.srt` (zostanie przetłumaczony bez transkrypcji) albo cały folder. Po najechaniu na nazwę pliku widać pełną ścieżkę.
+2. Wybierz **język mowy** (domyślnie wykrywany automatycznie) i **model**. `large-v3` jest najdokładniejszy, `large-v3-turbo` kilka razy szybszy. Jeśli wybrany język wyraźnie nie pasuje do nagrania, program użyje wykrytego i napisze o tym w logu.
+3. Opcjonalnie zaznacz **języki docelowe** i wybierz tłumacza. Przy tłumaczach API lista modeli uzupełnia się z Twojego konta po wpisaniu klucza. Języki spoza listy wpisz w pole **Inne języki** (tylko tłumacze LLM).
 4. Opcjonalnie dodaj **kontekst**: temat, nazwy własne, słownik albo regułę, np. *nie tłumacz nazwy marki*.
-5. Kliknij **Generuj napisy**. Pliki zapisują się obok źródła jako `nazwa.pl.srt`, `nazwa.en.srt` itd.
+5. Kliknij **Generuj napisy** (w trakcie pracy przycisk zmienia się w **Zatrzymaj**). Pliki zapisują się obok źródła jako `nazwa.pl.srt`, `nazwa.en.srt` itd. **Otwórz folder** pokazuje wyniki.
 
 ### Wersja konsolowa
 
@@ -102,7 +102,7 @@ generator-cli.bat film.mp4 -l pl -t en,de          # Windows
 | `-l pl` | język mowy / napisów (kod lub nazwa); bez tej opcji wykrywany automatycznie |
 | `-t en,de,kataloński` | języki docelowe; nazwy spoza `--list-languages` działają tylko z Claude |
 | `-e cli\|api\|codex\|openai\|ollama\|custom\|deepl` | tłumacz (domyślnie ostatnio użyty w GUI, inaczej `cli`) |
-| `--llm-model`, `--llm-url` | model / adres serwera dla `openai`, `ollama`, `custom` |
+| `--llm-model`, `--llm-url` | model dla `api`, `openai`, `ollama`, `custom`; adres serwera dla `ollama`, `custom` |
 | `-m large-v3-turbo` | model Whisper: `large-v3`, `large-v3-turbo`, `medium` |
 | `-c "…"` | kontekst dla tłumacza |
 | `-o folder` | folder wyjściowy (domyślnie obok pliku źródłowego) |

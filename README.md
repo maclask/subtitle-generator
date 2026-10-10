@@ -84,11 +84,11 @@ Keys you enter in the app are stored in the system keychain: Credential Manager 
 
 ### GUI
 
-1. **Add files**: video, audio, or an existing `.srt` file to translate it without transcription.
-2. Choose the **spoken language** (or auto-detect) and the **model**. `large-v3` is the most accurate; `large-v3-turbo` is several times faster.
-3. Optionally pick **target languages** and a translator. Use **Other languages** for anything not in the list (Claude only).
+1. **Add files**: drag them onto the window or use **Add files…**. You can add video, audio, an existing `.srt` file (translated without transcription), or a whole folder. Hover over a file name to see its full path.
+2. Choose the **spoken language** (auto-detect by default) and the **model**. `large-v3` is the most accurate; `large-v3-turbo` is several times faster. If the selected language clearly doesn't match the recording, the detected language is used and the log says so.
+3. Optionally pick **target languages** and a translator. For API translators, the model list fills in from your account once the key is entered. Use **Other languages** for anything not in the list (LLM translators only).
 4. Optionally add **context**: topic, proper names, a glossary, or a rule such as *keep the brand name untranslated*.
-5. Click **Generate subtitles**. Files are saved next to the source as `name.pl.srt`, `name.en.srt`, and so on.
+5. Click **Generate subtitles** (it turns into **Stop** while working). Files are saved next to the source as `name.pl.srt`, `name.en.srt`, and so on. **Open folder** shows the results.
 
 ### Command line
 
@@ -102,7 +102,7 @@ generator-cli.bat video.mp4 -l en -t pl,de          # Windows
 | `-l en` | spoken / subtitle language (code or name); detected if omitted |
 | `-t pl,de,catalan` | target languages; names outside `--list-languages` work with Claude only |
 | `-e cli\|api\|codex\|openai\|ollama\|custom\|deepl` | translator (default: the one last used in the GUI, otherwise `cli`) |
-| `--llm-model`, `--llm-url` | model / server URL for `openai`, `ollama`, `custom` |
+| `--llm-model`, `--llm-url` | model for `api`, `openai`, `ollama`, `custom`; server URL for `ollama`, `custom` |
 | `-m large-v3-turbo` | Whisper model: `large-v3`, `large-v3-turbo`, `medium` |
 | `-c "…"` | context for the translator |
 | `-o folder` | output folder (default: next to the source file) |

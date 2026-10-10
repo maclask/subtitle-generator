@@ -9,6 +9,11 @@ from tkinter import font as tkfont
 
 import customtkinter as ctk
 
+try:  # przeciąganie plików do okna; bez tej biblioteki program działa, tylko bez drag & drop
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+except ImportError:
+    TkinterDnD = None
+
 import core
 import i18n
 from i18n import t
@@ -139,6 +144,40 @@ class CheckGrid(tk.Canvas):
             self.draw()
 
 
+class Tooltip:
+    """Dymek z tekstem po najechaniu kursorem (np. pełna ścieżka pliku)."""
+
+    def __init__(self, widget, text, delay=400):
+        self.widget, self.text, self.delay, self.tip, self.job = widget, text, delay, None, None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _):
+        self._hide()
+        self.job = self.widget.after(self.delay, self._show)
+
+    def _show(self):
+        scale = ctk.ScalingTracker.get_widget_scaling(self.widget)
+        x, y = self.widget.winfo_pointerx() + round(12 * scale), self.widget.winfo_pointery() + round(18 * scale)
+        self.tip = tk.Toplevel(self.widget)
+        self.tip.wm_overrideredirect(True)
+        self.tip.wm_geometry(f"+{x}+{y}")
+        border = tk.Frame(self.tip, bg=mode_color(BORDER))
+        border.pack()
+        tk.Label(border, text=self.text, bg=mode_color(CARD), fg=mode_color(TEXT), justify="left",
+                 font=tkfont.Font(family=ctk.ThemeManager.theme["CTkFont"]["family"], size=-round(12 * scale)),
+                 padx=round(8 * scale), pady=round(4 * scale)).pack(padx=1, pady=1)
+
+    def _hide(self, _=None):
+        if self.job:
+            self.widget.after_cancel(self.job)
+            self.job = None
+        if self.tip:
+            self.tip.destroy()
+            self.tip = None
+
+
 class Card(ctk.CTkFrame):
     """Sekcja z tytułem."""
 
@@ -149,7 +188,7 @@ class Card(ctk.CTkFrame):
             row=0, column=0, columnspan=3, sticky="w", padx=18, pady=(14, 8))
 
 
-class App(ctk.CTk):
+class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
     def __init__(self):
         super().__init__()
         apply_theme(self)
@@ -165,6 +204,7 @@ class App(ctk.CTk):
         self.engine_code = self.cfg.get("engine", "cli")
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
+        self.dnd = self._enable_drop()
         self.build()
         self.after(100, self.poll)
 
@@ -220,6 +260,41 @@ class App(ctk.CTk):
         self._render_files()
         self.refresh_info()
 
+    def _enable_drop(self):
+        """Pliki (i foldery) upuszczone gdziekolwiek na okno trafiają na listę."""
+        if not TkinterDnD:
+            return False
+        try:
+            self.TkdndVersion = TkinterDnD._require(self)
+            self.drop_target_register(DND_FILES)
+        except Exception:
+            return False
+        self.dnd_bind("<<DropEnter>>", lambda e: (self._drop_highlight(True), e.action)[1])
+        self.dnd_bind("<<DropLeave>>", lambda e: (self._drop_highlight(False), e.action)[1])
+        self.dnd_bind("<<Drop>>", self.on_drop)
+        return True
+
+    def _drop_highlight(self, on):
+        self.files_card.configure(border_color=ACCENT if on else CARD_BORDER, border_width=2 if on else 1)
+
+    def on_drop(self, event):
+        self._drop_highlight(False)
+        self.add_paths(self.tk.splitlist(event.data))
+        return event.action
+
+    def add_paths(self, paths):
+        """Dodaje pliki; z folderu — wszystkie obsługiwane pliki w nim (bez podfolderów)."""
+        supported = core.MEDIA_EXT + (".srt",)
+        for p in paths:
+            items = sorted(os.path.join(p, f) for f in os.listdir(p)) if os.path.isdir(p) else [p]
+            for f in items:
+                if os.path.isfile(f) and f.lower().endswith(supported):
+                    if f not in self.paths:
+                        self.paths.append(f)
+                elif not os.path.isdir(p):
+                    self.log(t("unsupported", name=os.path.basename(f)))
+        self._render_files()
+
     def on_ui_lang(self, label):
         """Zmiana języka interfejsu: zapisz stan, przebuduj okno."""
         self._collect()
@@ -237,7 +312,7 @@ class App(ctk.CTk):
                              border_width=1, text_color=TEXT, hover_color=CONTROL)
 
     def _files_card(self, master):
-        c = Card(master, t("files"))
+        c = self.files_card = Card(master, t("files"))
         self.file_list = ctk.CTkFrame(c, corner_radius=8)
         self.file_list.grid(row=1, column=0, columnspan=3, sticky="ew", padx=18)
         self.file_list.grid_columnconfigure(0, weight=1)
@@ -252,7 +327,7 @@ class App(ctk.CTk):
         self.speech_map = {t("auto"): None, **{core.lang_name(code): code for code in core.LANGUAGES}}
         ctk.CTkLabel(c, text=t("speech_lang")).grid(row=1, column=0, sticky="w", padx=18, pady=5)
         self.speech = ctk.CTkOptionMenu(c, values=list(self.speech_map), width=220, dynamic_resizing=False)
-        saved = self.cfg.get("speech", "pl")
+        saved = self.cfg.get("speech", "auto")
         code = None if saved in (None, "auto") else core.resolve_language(saved)
         self.speech.set(core.lang_name(code) if code in core.LANGUAGES else t("auto"))
         self.speech.grid(row=1, column=1, sticky="w", padx=10, pady=5)
@@ -333,27 +408,26 @@ class App(ctk.CTk):
         self.refresh_info()
 
     def _build_fields(self):
+        """Pola silnika w kolejności: adres serwera → klucz → model (lista modeli zależy od dwóch pierwszych)."""
         for w in self.fields.winfo_children():
             w.destroy()
         engine, row = self.engine_code, 0
-        self.settings = {}
-        for field in core.ENGINE_FIELDS.get(engine, ()):
-            value = core.engine_setting(self.cfg, engine, field)
-            if engine == "ollama" and field == "model":
-                models = core.ollama_models(core.engine_setting(self.cfg, "ollama", "url"))
-                w = ctk.CTkComboBox(self.fields, values=models or [""], command=lambda _: self._store_settings())
-                w.set(value or (models[0] if models else ""))
-            else:
-                w = ctk.CTkEntry(self.fields, placeholder_text=t("url_placeholder") if field == "url" else "")
-                if value:
-                    w.insert(0, value)
-            self._on_edit(w, self._store_settings)
-            ctk.CTkLabel(self.fields, text=t("server_url") if field == "url" else t("model")).grid(
-                row=row, column=0, sticky="w", padx=16, pady=5)
-            w.grid(row=row, column=1, sticky="ew", padx=(10, 18), pady=5)
-            self.settings[field] = w
+        self.settings, self.key, self.model_box = {}, None, None
+        fields = core.ENGINE_FIELDS.get(engine, ())
+
+        def add_row(label, widget):
+            nonlocal row
+            ctk.CTkLabel(self.fields, text=label).grid(row=row, column=0, sticky="w", padx=16, pady=5)
+            widget.grid(row=row, column=1, sticky="ew", padx=(10, 18), pady=5)
             row += 1
-        self.key = None
+
+        if "url" in fields:
+            w = ctk.CTkEntry(self.fields, placeholder_text=t("url_placeholder"))
+            w.insert(0, core.engine_setting(self.cfg, engine, "url"))
+            self._on_edit(w, self._store_settings)
+            w.bind("<FocusOut>", lambda _: self._fetch_models(), add="+")
+            self.settings["url"] = w
+            add_row(t("server_url"), w)
         name = core.ENGINE_KEY.get(engine)
         if name:
             label = {"anthropic": t("key_anthropic"), "deepl": t("key_deepl")}.get(name, t("key"))
@@ -362,14 +436,40 @@ class App(ctk.CTk):
             if self.keys.get(name):
                 self.key.insert(0, self.keys[name])
             self._on_edit(self.key, self._store_key)
-            ctk.CTkLabel(self.fields, text=label).grid(row=row, column=0, sticky="w", padx=16, pady=5)
-            self.key.grid(row=row, column=1, sticky="ew", padx=(10, 18), pady=5)
+            add_row(label, self.key)
+        if "model" in fields:
+            value = core.engine_setting(self.cfg, engine, "model")
+            # lista rozwijana uzupełniana w tle modelami z API; nazwę można też wpisać ręcznie
+            self.model_box = ctk.CTkComboBox(self.fields, values=[value] if value else [],
+                                             command=lambda _: self._store_settings())
+            self.model_box.set(value)
+            self._on_edit(self.model_box, self._store_settings)
+            self.settings["model"] = self.model_box
+            add_row(t("model"), self.model_box)
+            self._fetch_models()
+
         if self.fields.winfo_children():  # pusta ramka CTk zachowałaby domyślne 200 px wysokości
             self.fields.grid()
         else:
             self.fields.grid_remove()
-        if engine == "ollama" and not self.cfg.get("ollama_model"):
-            self._store_settings()  # zapamiętaj pierwszy zainstalowany model jako domyślny
+
+    def _fetch_models(self):
+        """Pobiera listę modeli w tle (klucz / adres mogły się zmienić)."""
+        if not self.model_box:
+            return
+        engine, keys, settings = self.engine_code, dict(self.keys), dict(self.cfg)
+        self.models_id = getattr(self, "models_id", 0) + 1
+        req = self.models_id
+        threading.Thread(target=lambda: self.q.put(("models", (req, core.list_models(engine, keys, settings)))),
+                         daemon=True).start()
+
+    def _set_models(self, req, models):
+        if req != self.models_id or not self.model_box or not models:
+            return
+        self.model_box.configure(values=models)
+        if not self.model_box.get().strip():  # nic nie wybrano — weź pierwszy (najnowszy) model
+            self.model_box.set(models[0])
+            self._store_settings()
 
     def _on_edit(self, widget, callback):
         for event in ("<KeyRelease>", "<FocusOut>", "<<Paste>>"):  # wklejenie myszą nie daje KeyRelease
@@ -396,6 +496,10 @@ class App(ctk.CTk):
             self.log(str(e))
         self.keys[name] = value  # w tej sesji działa nawet bez magazynu
         self.refresh_info()
+        # nowy klucz → nowa lista modeli (z opóźnieniem, żeby nie pytać API przy każdym znaku)
+        if getattr(self, "_models_job", None):
+            self.after_cancel(self._models_job)
+        self._models_job = self.after(700, self._fetch_models)
 
     def refresh_info(self):
         engine, keys, model, settings = self.engine_code, dict(self.keys), self.model.get(), dict(self.cfg)
@@ -411,10 +515,7 @@ class App(ctk.CTk):
 
     def add(self):
         types = [(t("media_types"), " ".join("*" + e for e in core.MEDIA_EXT + (".srt",))), (t("all_files"), "*.*")]
-        for p in filedialog.askopenfilenames(title=t("choose_files"), filetypes=types):
-            if p not in self.paths:
-                self.paths.append(p)
-        self._render_files()
+        self.add_paths(filedialog.askopenfilenames(title=t("choose_files"), filetypes=types))
 
     def clear(self):
         self.paths.clear()
@@ -424,14 +525,16 @@ class App(ctk.CTk):
         for w in self.file_list.winfo_children():
             w.destroy()
         if not self.paths:
-            ctk.CTkLabel(self.file_list, text=t("files_empty"), text_color=MUTED, font=font(12)).grid(
+            ctk.CTkLabel(self.file_list, text=t("files_empty_dnd" if self.dnd else "files_empty"),
+                         text_color=MUTED, font=font(12)).grid(
                 row=0, column=0, pady=22)
             return
         last = len(self.paths) - 1
         for i, p in enumerate(self.paths):
             pad = (8 if i == 0 else 0, 8 if i == last else 0)
-            ctk.CTkLabel(self.file_list, text=os.path.basename(p), anchor="w").grid(
-                row=i, column=0, sticky="ew", padx=(14, 0), pady=pad)
+            name = ctk.CTkLabel(self.file_list, text=os.path.basename(p), anchor="w")
+            name.grid(row=i, column=0, sticky="ew", padx=(14, 0), pady=pad)
+            Tooltip(name, os.path.normpath(p))
             ctk.CTkLabel(self.file_list, text="SRT" if p.lower().endswith(".srt") else "media",
                          text_color=MUTED, font=font(12), width=50).grid(row=i, column=1, pady=pad)
             ctk.CTkButton(self.file_list, text="✕", width=28, height=24, fg_color="transparent",
@@ -458,6 +561,8 @@ class App(ctk.CTk):
             elif kind == "info" and val[0] == self.info_id:  # starsze, wolniejsze odpowiedzi pomijamy
                 self.stt_info.configure(text=val[1])
                 self.tr_info.configure(text=val[2])
+            elif kind == "models":
+                self._set_models(*val)
             elif kind == "output":
                 self.outputs.append(val)
                 self.open_btn.configure(state="normal")
