@@ -555,7 +555,9 @@ def _ask_cli(exe, system, user):
     proc = _run_proc(
         [exe, "-p", "Translate the subtitle cues given on stdin, following the system prompt.",
          "--output-format", "json", "--json-schema", json.dumps(SCHEMA),
-         "--system-prompt", system, "--tools", ""],
+         "--system-prompt", system, "--tools", "",
+         # bez serwerów MCP, wtyczek i zapisu sesji użytkownika: start CLI ~2 s szybciej
+         "--strict-mcp-config", "--no-session-persistence", "--no-chrome", "--disable-slash-commands"],
         user,
     )
     try:
@@ -787,7 +789,7 @@ def api_keys(cfg):
 class Options:
     language: str | None = None          # kod języka mowy / napisów; None = wykryj
     model: str = "large-v3"
-    targets: tuple = ()                   # kody z LANGUAGES albo dowolne nazwy (tylko Claude)
+    targets: tuple = ()                   # kody z LANGUAGES albo dowolne nazwy (tłumacze LLM, nie DeepL)
     engine: str = "cli"
     context: str = ""
     chars: int = 42
@@ -795,15 +797,40 @@ class Options:
     out_dir: str | None = None            # None = obok pliku źródłowego
     keys: dict | None = None
     settings: dict | None = None          # modele / adresy silników LLM (openai_model, custom_url…)
+    on_exists: object = None              # plik wynikowy istnieje: f(path) → 'overwrite' | 'copy' | 'skip'
 
 
 STT_WEIGHT, TRANSLATE_WEIGHT = 1.0, 0.4  # względny czas etapów (rozpoznawanie mowy vs jedno tłumaczenie)
+
+
+def free_name(path):
+    """film.en.srt → film.en (2).srt → film.en (3).srt… — pierwsza wolna nazwa."""
+    base, ext = os.path.splitext(path)
+    n = 2
+    while os.path.exists(f"{base} ({n}){ext}"):
+        n += 1
+    return f"{base} ({n}){ext}"
+
+
+def output_path(path, on_exists):
+    """Ścieżka do zapisu albo None (pomiń). on_exists(path) → 'overwrite' | 'copy' | 'skip'."""
+    if not os.path.exists(path):
+        return path
+    choice = on_exists(path) if on_exists else "copy"
+    return path if choice == "overwrite" else None if choice == "skip" else free_name(path)
+
+
+# równoległe tłumaczenia na kilka języków; lokalny model (Ollama) liczy na jednej karcie, więc po kolei
+PARALLEL = {"ollama": 1}
+MAX_PARALLEL = 4
 
 
 def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda path: None):
     """Wideo/audio → SRT (+ tłumaczenia). Plik .srt → tylko tłumaczenia. Zwraca listę zapisanych plików.
 
     progress(v, stage): v = postęp całego pliku 0–1 (None = etap bez procentów), stage = opis etapu."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     media = not path.lower().endswith(".srt")
     n_tr = len([x for x in o.targets if x != o.language])
     total = (STT_WEIGHT if media else 0) + TRANSLATE_WEIGHT * n_tr or 1
@@ -818,6 +845,21 @@ def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda
     folder = o.out_dir or os.path.dirname(os.path.abspath(path))
     name = os.path.splitext(os.path.basename(path))[0]
     written = []
+
+    def resolve(target_path):
+        out = output_path(target_path, o.on_exists)
+        if out is None:
+            log(t("skipped_existing", path=target_path))
+        return out
+
+    def save(cues, target_path, message, resolved=False):
+        out = target_path if resolved else resolve(target_path)
+        if out is None:
+            return
+        write_srt(cues, out, o.chars)
+        written.append(out)
+        saved(out)
+        log(message(out))
 
     if path.lower().endswith(".srt"):
         src = o.language
@@ -834,23 +876,49 @@ def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda
             log(t("no_speech"))
             return written
         cues = build_cues(words, o.chars, o.lines)
-        out = os.path.join(folder, f"{name}.{src}.srt")
-        write_srt(cues, out, o.chars)
-        written.append(out)
-        saved(out)
-        log(t("saved_n", path=out, n=len(cues)))
+        save(cues, os.path.join(folder, f"{name}.{src}.srt"), lambda out: t("saved_n", path=out, n=len(cues)))
 
-    for tgt in o.targets:
-        if tgt == src:
-            continue
+    # o istniejące pliki tłumaczeń pytamy przed tłumaczeniem — pominięte języki nie są tłumaczone
+    plan = {}
+    for tgt in dict.fromkeys(o.targets):
+        if tgt != src:
+            check_cancel()
+            out = resolve(os.path.join(folder, f"{name}.{file_suffix(tgt)}.srt"))
+            if out:
+                plan[tgt] = out
+    targets = list(plan)
+    total = offset + TRANSLATE_WEIGHT * len(targets) or 1
+    done = {x: 0.0 for x in targets}
+
+    def report(tgt, v):
+        done[tgt] = v
+        finished = sum(1 for x in done.values() if x >= 1)
+        label = (t("stage_translate", lang=lang_name(tgt)) if len(targets) == 1
+                 else t("stage_translate_n", done=finished, n=len(targets)))
+        progress(min(offset + TRANSLATE_WEIGHT * sum(done.values()), total) / total, label)
+
+    def job(tgt):
         check_cancel()
-        translated = translate(cues, src, tgt, o.engine, o.context, log, keys, o.settings,
-                               stage(TRANSLATE_WEIGHT, t("stage_translate", lang=lang_name(tgt))))
-        offset = min(offset + TRANSLATE_WEIGHT, total)
-        out = os.path.join(folder, f"{name}.{file_suffix(tgt)}.srt")
-        write_srt(translated, out, o.chars)
-        written.append(out)
-        saved(out)
-        log(t("saved", path=out))
+        result = translate(cues, src, tgt, o.engine, o.context, log, keys, o.settings, lambda v: report(tgt, v))
+        report(tgt, 1.0)
+        return tgt, result
+
+    failed = []
+    workers = min(PARALLEL.get(o.engine, MAX_PARALLEL), len(targets)) or 1
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(job, tgt) for tgt in targets]
+        for future in as_completed(futures):
+            try:
+                tgt, translated = future.result()
+            except Cancelled:
+                CANCEL.set()  # zatrzymaj pozostałe tłumaczenia
+                raise
+            except Exception as e:  # błąd jednego języka nie przerywa pozostałych
+                log(t("error", err=e))
+                failed.append(e)
+                continue
+            save(translated, plan[tgt], lambda out: t("saved", path=out), resolved=True)
+    if failed and len(failed) == len(targets):
+        raise failed[0]
     progress(1.0, t("done"))
     return written

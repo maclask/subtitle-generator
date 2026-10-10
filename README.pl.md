@@ -100,13 +100,14 @@ generator-cli.bat film.mp4 -l pl -t en,de          # Windows
 | Opcja | Opis |
 |---|---|
 | `-l pl` | język mowy / napisów (kod lub nazwa); bez tej opcji wykrywany automatycznie |
-| `-t en,de,kataloński` | języki docelowe; nazwy spoza `--list-languages` działają tylko z Claude |
+| `-t en,de,kataloński` | języki docelowe; nazwy spoza `--list-languages` działają z każdym tłumaczem oprócz DeepL |
 | `-e cli\|api\|codex\|openai\|ollama\|custom\|deepl` | tłumacz (domyślnie ostatnio użyty w GUI, inaczej `cli`) |
 | `--llm-model`, `--llm-url` | model dla `api`, `openai`, `ollama`, `custom`; adres serwera dla `ollama`, `custom` |
 | `-m large-v3-turbo` | model Whisper: `large-v3`, `large-v3-turbo`, `medium` |
 | `-c "…"` | kontekst dla tłumacza |
 | `-o folder` | folder wyjściowy (domyślnie obok pliku źródłowego) |
 | `--chars 42 --lines 2` | format napisów |
+| `--overwrite` | nadpisuj istniejące pliki napisów (domyślnie zapisywana jest kopia, np. `film.en (2).srt`) |
 | `--ui-lang pl` | język komunikatów (`pl` lub `en`) |
 
 ### Zalecany obieg przy poprawianiu napisów

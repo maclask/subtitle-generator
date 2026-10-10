@@ -31,10 +31,12 @@ i18n.S.update({
     "a_out": ("folder wyjściowy (domyślnie obok pliku)", "output folder (default: next to the source file)"),
     "a_chars": ("maks. znaków w linii (42)", "max characters per line (42)"),
     "a_lines": ("maks. linii w napisie (2)", "max lines per subtitle (2)"),
+    "a_overwrite": ("nadpisuj istniejące pliki (domyślnie: zapis jako kopia, np. film.en (2).srt)",
+                    "overwrite existing files (default: save as a copy, e.g. video.en (2).srt)"),
     "a_list": ("pokaż obsługiwane języki", "list supported languages"),
     "a_ui": ("język komunikatów: pl lub en", "message language: pl or en"),
     "translator_is": ("Tłumacz: {info}", "Translator: {info}"),
-    "claude_only": ("(tylko Claude)", "(Claude only)"),
+    "claude_only": ("(bez DeepL)", "(not DeepL)"),
 })
 
 
@@ -58,6 +60,7 @@ def main():
     p.add_argument("-o", "--out-dir", help=t("a_out"))
     p.add_argument("--chars", type=int, default=42, help=t("a_chars"))
     p.add_argument("--lines", type=int, default=2, help=t("a_lines"))
+    p.add_argument("--overwrite", action="store_true", help=t("a_overwrite"))
     p.add_argument("--list-languages", action="store_true", help=t("a_list"))
     p.add_argument("--ui-lang", choices=["pl", "en"], help=t("a_ui"))
     a = p.parse_args()
@@ -80,7 +83,7 @@ def main():
         settings[f"{engine}_url"] = a.llm_url
     opts = core.Options(language=lang, model=a.model, targets=targets, engine=engine, context=a.context,
                         chars=a.chars, lines=a.lines, out_dir=a.out_dir, keys=core.api_keys(cfg),
-                        settings=settings)
+                        settings=settings, on_exists=(lambda p: "overwrite") if a.overwrite else None)
 
     if targets:
         print(t("translator_is", info=core.engine_info(opts.engine, opts.keys, settings)))

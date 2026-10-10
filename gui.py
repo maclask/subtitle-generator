@@ -191,6 +191,49 @@ class Tooltip:
             self.tip = None
 
 
+class ExistsDialog(ctk.CTkToplevel):
+    """Plik wynikowy już istnieje: Nadpisz / Zapisz jako kopię / Pomiń (+ „dla wszystkich”)."""
+
+    def __init__(self, master, path, on_answer):
+        super().__init__(master)
+        self.on_answer, self.answered = on_answer, False
+        self.title(t("exists_title"))
+        self.resizable(False, False)
+        if os.name == "nt":  # CTkToplevel też nadpisuje ikonę po ~200 ms
+            ico = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icon.ico")
+            self.after(300, lambda: os.path.exists(ico) and self.iconbitmap(ico))
+        self.transient(master)
+        self.protocol("WM_DELETE_WINDOW", lambda: self.answer("skip"))
+        ctk.CTkLabel(self, text=t("exists_msg", path=os.path.normpath(path)), justify="left", wraplength=520).pack(
+            anchor="w", padx=24, pady=(20, 10))
+        self.all = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(self, text=t("apply_all"), variable=self.all, checkbox_width=18, checkbox_height=18,
+                        font=font(12)).pack(anchor="w", padx=24, pady=(0, 16))
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x", padx=24, pady=(0, 20))
+        ctk.CTkButton(row, text=t("save_copy"), command=lambda: self.answer("copy")).pack(side="right")
+        for key in ("overwrite", "skip"):
+            ctk.CTkButton(row, text=t(key), fg_color="transparent", border_width=1, text_color=TEXT,
+                          hover_color=CONTROL, command=lambda k=key: self.answer(k)).pack(side="right", padx=(0, 8))
+        self.after(50, self._center)
+
+    def _center(self):
+        m = self.master
+        self.update_idletasks()
+        x = m.winfo_rootx() + (m.winfo_width() - self.winfo_width()) // 2
+        y = m.winfo_rooty() + (m.winfo_height() - self.winfo_height()) // 3
+        self.geometry(f"+{x}+{y}")
+        self.lift()
+        self.focus_force()
+        self.grab_set()
+
+    def answer(self, choice):
+        if not self.answered:
+            self.answered = True
+            self.on_answer(choice, self.all.get())
+            self.destroy()
+
+
 class Card(ctk.CTkFrame):
     """Sekcja z tytułem."""
 
@@ -270,6 +313,9 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         self.bar = ctk.CTkProgressBar(bottom, height=8)
         self.bar.set(0)
         self.bar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        if not self.running and not getattr(self, "started", False):
+            # niewidoczny (kolor tła), dopóki nie ruszy pierwsze zadanie — miejsce zostaje, układ nie skacze
+            self.bar.configure(fg_color=BG, progress_color=BG)
         self.status = ctk.CTkLabel(bottom, text="", text_color=MUTED, font=font(12), anchor="w", height=18)
         self.status.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         self._set_running(self.running)
@@ -609,6 +655,9 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
             elif kind == "info" and val[0] == self.info_id:  # starsze, wolniejsze odpowiedzi pomijamy
                 self.stt_info.configure(text=val[1])
                 self.tr_info.configure(text=val[2])
+            elif kind == "ask_exists":
+                path, reply = val
+                ExistsDialog(self, path, reply)
             elif kind == "models":
                 self._set_models(*val)
             elif kind == "output":
@@ -671,10 +720,14 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         opts = core.Options(
             language=self.speech_map[self.speech.get()], model=self.model.get(), targets=self._targets(),
             engine=self.engine_code, context=self.cfg["context"], chars=self.cfg["chars"],
-            lines=self.cfg["lines"], keys=dict(self.keys), settings=dict(self.cfg),
+            lines=self.cfg["lines"], keys=dict(self.keys), settings=dict(self.cfg), on_exists=self._ask_exists,
         )
+        self._exists_all = None  # odpowiedź „dla wszystkich” obowiązuje do końca tego zadania
+        self._exists_lock = threading.Lock()
         core.CANCEL.clear()
         self.outputs = []
+        self.started = True
+        self.bar.configure(fg_color=CONTROL)
         self._set_running(True)
         threading.Thread(target=self.work, args=(list(self.paths), opts), daemon=True).start()
 
@@ -727,6 +780,24 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         else:
             subprocess.Popen(["xdg-open", os.path.dirname(path)])
 
+    def _ask_exists(self, path):
+        """Wołane z wątku pracy: pyta w oknie głównym i czeka na odpowiedź (pytania po kolei)."""
+        with self._exists_lock:
+            if self._exists_all:
+                return self._exists_all
+            answered, result = threading.Event(), {}
+
+            def reply(choice, for_all):
+                result["choice"] = choice
+                if for_all:
+                    self._exists_all = choice
+                answered.set()
+
+            self.q.put(("ask_exists", (path, reply)))
+            while not answered.wait(0.2):
+                core.check_cancel()
+            return result["choice"]
+
     def _show_progress(self, value, text):
         """value None = etap bez znanego postępu (ładowanie / pobieranie modelu) → animowany pasek."""
         if value is None:
@@ -737,6 +808,8 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
             if self.bar.cget("mode") != "determinate":
                 self.bar.stop()
                 self.bar.configure(mode="determinate")
+            # przy 0 CTk rysuje kropkę na początku paska — wtedy wypełnienie w kolorze tła
+            self.bar.configure(progress_color=ACCENT if value > 0.005 else CONTROL)
             self.bar.set(value)
         self.status.configure(text=text)
 

@@ -100,13 +100,14 @@ generator-cli.bat video.mp4 -l en -t pl,de          # Windows
 | Option | Description |
 |---|---|
 | `-l en` | spoken / subtitle language (code or name); detected if omitted |
-| `-t pl,de,catalan` | target languages; names outside `--list-languages` work with Claude only |
+| `-t pl,de,catalan` | target languages; names not in `--list-languages` work with every translator except DeepL |
 | `-e cli\|api\|codex\|openai\|ollama\|custom\|deepl` | translator (default: the one last used in the GUI, otherwise `cli`) |
 | `--llm-model`, `--llm-url` | model for `api`, `openai`, `ollama`, `custom`; server URL for `ollama`, `custom` |
 | `-m large-v3-turbo` | Whisper model: `large-v3`, `large-v3-turbo`, `medium` |
 | `-c "…"` | context for the translator |
 | `-o folder` | output folder (default: next to the source file) |
 | `--chars 42 --lines 2` | subtitle layout |
+| `--overwrite` | overwrite existing subtitle files (by default a copy such as `video.en (2).srt` is saved) |
 | `--ui-lang en` | message language (`en` or `pl`) |
 
 ### Recommended workflow for editing
