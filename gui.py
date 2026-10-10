@@ -237,8 +237,8 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         super().__init__()
         self._set_icon()
         apply_theme(self)
-        self.geometry("1120x850")
-        self.minsize(980, 760)
+        self.geometry("1120x880")
+        self.minsize(980, 800)
         self.q = queue.Queue()
         self.cfg = core.load_config()
         i18n.set_lang(self.cfg.get("ui_lang"))
@@ -287,7 +287,7 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         self.log_box.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
         self.log_box.insert("end", log_text)
         self.log_box.configure(state="disabled")
-        left.grid_rowconfigure(3, weight=1)
+        left.grid_rowconfigure(3, weight=1, minsize=round(80 * ctk.ScalingTracker.get_widget_scaling(self)))
         self._translate_card(right).grid(row=0, column=0, sticky="nsew")
 
         bottom = ctk.CTkFrame(b, fg_color="transparent")
@@ -405,16 +405,19 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         return c
 
     def _format_card(self, master):
+        """Oba ustawienia w jednym wierszu — zostaje więcej miejsca na log."""
         c = Card(master, t("format"))
-        ctk.CTkLabel(c, text=t("chars")).grid(row=1, column=0, sticky="w", padx=18, pady=5)
-        self.chars = ctk.CTkOptionMenu(c, values=[str(n) for n in (32, 37, 40, 42, 45, 50)], width=90,
+        row = ctk.CTkFrame(c, fg_color="transparent")
+        row.grid(row=1, column=0, columnspan=3, sticky="w", padx=18, pady=(2, 16))
+        ctk.CTkLabel(row, text=t("chars")).pack(side="left")
+        self.chars = ctk.CTkOptionMenu(row, values=[str(n) for n in (32, 37, 40, 42, 45, 50)], width=80,
                                        command=self._autosave)
         self.chars.set(str(self.cfg.get("chars", 42)))
-        self.chars.grid(row=1, column=1, sticky="w", padx=10, pady=5)
-        ctk.CTkLabel(c, text=t("lines")).grid(row=2, column=0, sticky="w", padx=18, pady=(5, 16))
-        self.lines = ctk.CTkSegmentedButton(c, values=["1", "2", "3"], command=self._autosave)
+        self.chars.pack(side="left", padx=(10, 28))
+        ctk.CTkLabel(row, text=t("lines")).pack(side="left")
+        self.lines = ctk.CTkSegmentedButton(row, values=["1", "2", "3"], command=self._autosave)
         self.lines.set(str(self.cfg.get("lines", 2)))
-        self.lines.grid(row=2, column=1, sticky="w", padx=10, pady=(5, 16))
+        self.lines.pack(side="left", padx=(10, 0))
         return c
 
     def _translate_card(self, master):
@@ -457,7 +460,7 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
 
         ctk.CTkLabel(c, text=t("context"), text_color=MUTED, font=font(12)).grid(
             row=7, column=0, columnspan=3, sticky="w", padx=18, pady=(10, 4))
-        self.context = ctk.CTkTextbox(c, height=70, activate_scrollbars=False)  # mniej kanw = płynniejsza zmiana rozmiaru
+        self.context = ctk.CTkTextbox(c, height=70)
         self.context.insert("1.0", self.cfg.get("context", ""))
         self.context.grid(row=8, column=0, columnspan=3, sticky="nsew", padx=18, pady=(0, 16))
         self.context.bind("<KeyRelease>", self._autosave, add="+")
@@ -603,7 +606,12 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         self.paths.clear()
         self._render_files()
 
+    FILES_VISIBLE = 4  # tyle wierszy listy plików naraz; reszta przewijana
+
     def _render_files(self):
+        """Lista plików: najwyżej FILES_VISIBLE wierszy, przy dłuższej liście pasek przewijania i kółko myszy.
+
+        (CTkScrollableFrame nie schodzi poniżej ~200 px wysokości, więc przewijamy „okno” na liście.)"""
         for w in self.file_list.winfo_children():
             w.destroy()
         if not self.paths:
@@ -611,18 +619,53 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
                          text_color=MUTED, font=font(12)).grid(
                 row=0, column=0, pady=22)
             return
-        last = len(self.paths) - 1
-        for i, p in enumerate(self.paths):
+        n, vis = len(self.paths), self.FILES_VISIBLE
+        self.file_start = max(0, min(getattr(self, "file_start", 0), n - vis))
+        shown = self.paths[self.file_start:self.file_start + vis]
+        last = len(shown) - 1
+        for i, p in enumerate(shown):
             pad = (8 if i == 0 else 0, 8 if i == last else 0)
-            name = ctk.CTkLabel(self.file_list, text=os.path.basename(p), anchor="w")
+            base = os.path.basename(p)
+            if len(base) > 44:  # długą nazwę skracamy w środku — pełna ścieżka jest w dymku
+                base = base[:22] + "…" + base[-21:]
+            name = ctk.CTkLabel(self.file_list, text=base, anchor="w")
             name.grid(row=i, column=0, sticky="ew", padx=(14, 0), pady=pad)
             Tooltip(name, os.path.normpath(p))
-            ctk.CTkLabel(self.file_list, text="SRT" if p.lower().endswith(".srt") else "media",
-                         text_color=MUTED, font=font(12), width=50).grid(row=i, column=1, pady=pad)
+            kind = ctk.CTkLabel(self.file_list, text="SRT" if p.lower().endswith(".srt") else "media",
+                                text_color=MUTED, font=font(12), width=50)
+            kind.grid(row=i, column=1, pady=pad)
             ctk.CTkButton(self.file_list, text="✕", width=28, height=24, fg_color="transparent",
                           text_color=MUTED, hover_color=CONTROL_HOVER,
                           command=lambda p=p: (self.paths.remove(p), self._render_files())).grid(
                 row=i, column=2, padx=(0, 6), pady=pad)
+            for w in (name, kind):
+                self._bind_wheel(w)
+        if n > vis:
+            bar = ctk.CTkScrollbar(self.file_list, command=self._scroll_files, button_color=CONTROL_HOVER,
+                                   button_hover_color=BORDER)
+            bar.grid(row=0, column=3, rowspan=vis, sticky="ns", padx=(0, 4), pady=6)
+            bar.set(self.file_start / n, (self.file_start + vis) / n)
+        self._bind_wheel(self.file_list)
+
+    def _bind_wheel(self, widget):
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):  # Windows/macOS, Linux
+            widget.bind(seq, self._wheel_files, add="+")
+
+    def _wheel_files(self, event):
+        step = -1 if getattr(event, "num", 0) == 4 or getattr(event, "delta", 0) > 0 else 1
+        self._scroll_files("scroll", step, "units")
+
+    def _scroll_files(self, action, value, unit=None):
+        n, vis = len(self.paths), self.FILES_VISIBLE
+        old = getattr(self, "file_start", 0)
+        if action == "moveto":
+            new = round(float(value) * n)
+        else:
+            new = old + int(value) * (vis if unit == "pages" else 1)
+        new = max(0, min(new, n - vis))
+        if new != old:
+            self.file_start = new
+            self._render_files()
 
     # ------------------------------------------------------------ log / kolejka
 
