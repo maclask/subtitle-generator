@@ -37,6 +37,14 @@ i18n.S.update({
     "a_lines": ("maks. linii w napisie (2)", "max lines per subtitle (2)"),
     "a_overwrite": ("nadpisuj istniejące pliki (domyślnie: zapis jako kopia, np. film.en (2).srt)",
                     "overwrite existing files (default: save as a copy, e.g. video.en (2).srt)"),
+    "a_download": ("pobierz brakujący model Whisper bez pytania (np. w skryptach)",
+                   "download a missing Whisper model without asking (e.g. in scripts)"),
+    "model_ask": ("Model rozpoznawania mowy {model} ({gb} GB) nie jest pobrany. Pobrać teraz? [t/N] ",
+                  "The {model} speech recognition model ({gb} GB) is not downloaded. Download it now? [y/N] "),
+    "model_skip_cli": ("Model {model} nie jest pobrany — pomijam pliki wideo i audio ({n}). "
+                       "Aby go pobrać, uruchom program w terminalu albo z opcją --download-model.",
+                       "The {model} model is not downloaded — skipping video and audio files ({n}). "
+                       "To download it, run the program in a terminal or with --download-model."),
     "a_list": ("pokaż obsługiwane języki", "list supported languages"),
     "a_ui": ("język komunikatów: pl lub en", "message language: pl or en"),
     "translator_is": ("Tłumacz: {info}", "Translator: {info}"),
@@ -58,6 +66,7 @@ def main():
     p.add_argument("-t", "--translate", default="", help=t("a_translate"))
     p.add_argument("-e", "--engine", choices=list(core.ENGINES), default=None, help=t("a_engine"))
     p.add_argument("-m", "--model", choices=core.WHISPER_MODELS, default="large-v3", help=t("a_model"))
+    p.add_argument("--download-model", action="store_true", help=t("a_download"))
     p.add_argument("--llm-model", help=t("a_llm_model"))
     p.add_argument("--llm-url", help=t("a_llm_url"))
     p.add_argument("-c", "--context", default="", help=t("a_context"))
@@ -102,8 +111,14 @@ def main():
             print(t("error", err=e), file=sys.stderr)
             return 1
         print(t("translator_is", info=core.engine_info(opts.engine, opts.keys, settings)))
-    failed = 0
-    for path in a.files:
+    failed, files = 0, list(a.files)
+    media = [f for f in files if not core.is_subtitle(f)]
+    if media and not core.model_cached(a.model) and not _get_model(a.model, a.download_model):
+        # bez modelu: pliki wideo/audio pomijamy, pliki napisów tłumaczymy
+        print(t("model_skip_cli", model=a.model, n=len(media)), file=sys.stderr)
+        files = [f for f in files if core.is_subtitle(f)]
+        failed += len(media)
+    for path in files:
         print(f"=== {path}")
         try:
             core.process_file(path, opts, print, _progress)
@@ -113,6 +128,34 @@ def main():
             print("\n" + t("error", err=e), file=sys.stderr)
             failed += 1
     return 1 if failed else 0
+
+
+def _get_model(model, without_asking):
+    """Brak modelu Whisper: pobiera go po zgodzie (pytanie w terminalu) albo z opcją --download-model.
+    Bez terminala (skrypt, potok) i bez tej opcji nic nie pobiera. Zwraca True, gdy model jest gotowy."""
+    if not without_asking:
+        if not sys.stdin.isatty():
+            return False
+        gb = i18n.decimal(core.WHISPER_SIZES.get(model, 0))
+        try:
+            answer = input(t("model_ask", model=model, gb=gb))
+        except EOFError:
+            return False
+        if answer.strip().lower() not in ("t", "tak", "y", "yes"):
+            return False
+
+    def progress(done, total):
+        if sys.stdout.isatty() and total:
+            text = t("downloading", model=model, done=i18n.decimal(done / 1e9), total=i18n.decimal(total / 1e9))
+            print(f"\r  {text} {done / total:4.0%}   ", end="", flush=True)
+
+    try:
+        core.download_model(model, progress)
+    except RuntimeError as e:
+        print("\n" + t("error", err=e), file=sys.stderr)
+        return False
+    print("\n" + t("model_downloaded", model=model))
+    return True
 
 
 def _progress(v, stage=None):

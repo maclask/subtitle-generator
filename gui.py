@@ -94,10 +94,10 @@ LOG_STYLE = {
     "unsupported": ("warn", "!"), "skipped_existing": ("detail", "–"),
     "chunk": ("detail", ""), "retry_missing": ("detail", ""),
     "model_downloaded": ("ok", "✓"), "no_model_skip": ("warn", "!"), "download_cancelled": ("detail", "–"),
-    "done": ("done", "✓"), "done_with_errors": ("done_warn", "!"), "cancelled": ("done_muted", "■"),
+    "done": ("done", "✓"), "done_with_errors": ("done_warn", "!"), "done_skipped": ("done_warn", "!"), "cancelled": ("done_muted", "■"),
 }
 LOG_SHORT_PATH = ("saved", "saved_n", "skipped_existing", "using_existing")
-LOG_END = ("done", "done_with_errors", "cancelled")  # podsumowanie zadania — poza blokiem pliku
+LOG_END = ("done", "done_with_errors", "done_skipped", "cancelled")  # podsumowanie zadania — poza blokiem pliku
 LABEL_COL = 140  # szerokość kolumny etykiet w karcie tłumaczenia
 LOG_MIN_W = 320  # minimalna szerokość kolumny logu
 LOG_EXTRA_W = 60  # o tyle szerszy log przy starcie (resztę daje poszerzenie okna)
@@ -368,7 +368,7 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         import ctypes
 
         try:
-            u = ctypes.windll.user32
+            u = ctypes.WinDLL("user32")  # własna instancja: argtypes nie zmieniają się dla CustomTkinter
             u.LoadImageW.restype = ctypes.c_void_p
             u.LoadImageW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint, ctypes.c_int, ctypes.c_int,
                                      ctypes.c_uint]
@@ -461,7 +461,9 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         self.model = ctk.CTkSegmentedButton(c, values=core.WHISPER_MODELS, command=self.on_model)
         saved = self.cfg.get("model", "large-v3")
         cached = [m for m in core.WHISPER_MODELS if core.model_cached(m)]
-        self.model.set(saved if saved in cached or not cached else cached[0])  # pobrany zamiast niepobranego
+        # pobrany zamiast niepobranego — ale zapisany wybór zostaje, dopóki użytkownik sam nie zmieni modelu
+        self.model_pref = saved
+        self.model.set(saved if saved in cached or not cached else cached[0])
         self.model.grid(row=2, column=1, sticky="w", padx=10, pady=5)
         # poprawka transkrypcji przez LLM — silnikiem z sekcji Tłumaczenie
         row = ctk.CTkFrame(c, fg_color="transparent")
@@ -490,10 +492,10 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
 
     @staticmethod
     def _gb(value):
-        text = f"{value:.1f}"
-        return text.replace(".", ",") if i18n.LANG == "pl" else text
+        return i18n.decimal(value)
 
     def on_model(self, _=None):
+        self.model_pref = self.model.get()
         self.refresh_info()
         self._autosave()
         self._update_model_state()
@@ -513,7 +515,7 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
             for w in (self.dl_choice, self.dl_btn):
                 w.grid_remove()
             self.dl_bar.grid(row=1, column=0, sticky="ew", padx=(12, 12), pady=(0, 12))
-            self.dl_stop.configure(state="normal")
+            self.dl_stop.configure(state="disabled" if self.dl_cancel.is_set() else "normal")
             self.dl_stop.grid(row=1, column=1, sticky="e", padx=(0, 12), pady=(0, 12))
             self._show_download_progress()
         elif selected in cached:
@@ -574,6 +576,7 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         if err is None:
             self.log(t("model_downloaded", model=name))
             self.model.set(name)
+            self.model_pref = name
             self.refresh_info()
             self._autosave()
         elif err == "cancelled":
@@ -933,11 +936,12 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
             key, kw = getattr(val, "key", None), getattr(val, "kw", {})
             style, icon = LOG_STYLE.get(key, ("text", ""))
             if key in LOG_SHORT_PATH:  # pełna ścieżka jest pod „Otwórz folder”; w logu wystarczy nazwa pliku
-                text = t(key, **{**kw, "path": os.path.basename(kw["path"])})
+                # w języku, w którym wpis powstał — także po zmianie języka interfejsu (bez mieszania języków)
+                text = t(key, in_lang=val.lang, **{**kw, "path": os.path.basename(kw["path"])})
             elif key == "error":
                 text = str(kw["err"])
             elif key:
-                text = t(key, **kw)  # po zmianie języka interfejsu — już w nowym języku
+                text = str(val)
             else:
                 text = str(val)
                 style = "trace" if text.startswith("Traceback") else style
@@ -1039,7 +1043,7 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         """Stan formularza → self.cfg (bez kluczy — te są w magazynie haseł)."""
         speech = self.speech_map[self.speech.get()]
         self.cfg.update(
-            speech=speech or "auto", model=self.model.get(), engine=self.engine_code,
+            speech=speech or "auto", model=self.model_pref, engine=self.engine_code,
             targets=[c for c, v in self.targets.items() if v.get()], other=self._other_value(self.other.get()),
             chars=int(self.chars.get()), lines=int(self.lines.get()),
             format=next(k for k, v in core.FORMATS.items() if v == self.fmt.get()),
@@ -1184,15 +1188,13 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
                 self.log(traceback.format_exc())
 
         try:
+            skipped = []
             if not core.model_cached(opts.model):  # modelu nie pobieramy po cichu — tylko z panelu w karcie
-                for path in files:
-                    if not core.is_subtitle(path):
-                        self.log(t("no_model_skip", name=os.path.basename(path)))
+                skipped = [os.path.basename(p) for p in files if not core.is_subtitle(p)]
+                for name in skipped:
+                    self.log(t("no_model_skip", name=name))
                 files = [p for p in files if core.is_subtitle(p)]  # pliki napisów: samo tłumaczenie
                 n = len(files)
-                if not files:
-                    self.q.put(("progress", (0, "")))
-                    return
             if opts.targets or (opts.correct and not all(map(core.is_subtitle, files))):
                 # niedostępny tłumacz (do tłumaczeń lub poprawki) zgłaszamy od razu, a nie po transkrypcji
                 core.check_engine(opts.engine, opts.keys, opts.settings)
@@ -1232,7 +1234,9 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
                 except Exception as e:
                     fail(path, e)
             if failed:
-                summary = t("done_with_errors", n=len(failed), files=", ".join(failed))
+                summary = t("done_with_errors", n=len(failed) + len(skipped), files=", ".join(failed + skipped))
+            elif skipped:
+                summary = t("done_skipped", n=len(skipped), files=", ".join(skipped))
             else:
                 summary = t("done")
             self.q.put(("progress", (1.0, summary)))

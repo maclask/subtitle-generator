@@ -205,11 +205,12 @@ def _load_model(model_name, device, log, progress):
 
     key = (model_name, device)
     if key not in _LOADED:
-        dev = "GPU" if device == "cuda" else "CPU"
-        cached = model_cached(model_name)
-        log(t("loading_model" if cached else "downloading_model", model=model_name, dev=dev))
-        progress(None, t("stage_loading") if cached else t("stage_download"))
-        model = WhisperModel(model_name, device=device, compute_type="float16" if device == "cuda" else "int8")
+        if not model_cached(model_name):  # nigdy nie pobieramy po cichu — GUI i CLI pytają wcześniej
+            raise RuntimeError(t("model_not_downloaded", model=model_name))
+        log(t("loading_model", model=model_name, dev="GPU" if device == "cuda" else "CPU"))
+        progress(None, t("stage_loading"))
+        model = WhisperModel(model_name, device=device, compute_type="float16" if device == "cuda" else "int8",
+                             local_files_only=True)
         _LOADED.clear()  # jeden model naraz (pamięć karty) — dopiero gdy nowy się załadował
         _LOADED[key] = model
     return _LOADED[key]
@@ -256,47 +257,65 @@ def _run_whisper(path, language, model_name, device, log, progress):
     return words, info.language
 
 
-def model_cached(model_name):
-    """Czy model Whisper jest już pobrany (kompletny model.bin w cache Hugging Face)."""
-    try:
+# repozytoria modeli na Hugging Face (jak w faster_whisper.utils._MODELS) — bez importu faster_whisper,
+# który przy starcie okna kosztowałby ułamek sekundy
+WHISPER_REPOS = {
+    "large-v3": "Systran/faster-whisper-large-v3",
+    "large-v3-turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+    "medium": "Systran/faster-whisper-medium",
+}
+
+
+def _model_dir(model_name):
+    """Katalog modelu w cache Hugging Face (te same zmienne środowiskowe co huggingface_hub)."""
+    cache = os.environ.get("HF_HUB_CACHE") or os.environ.get("HUGGINGFACE_HUB_CACHE")
+    if not cache:
+        home = os.environ.get("HF_HOME") or os.path.join(
+            os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache"), "huggingface")
+        cache = os.path.join(home, "hub")
+    repo = WHISPER_REPOS.get(model_name)
+    if repo is None:
         from faster_whisper.utils import _MODELS
-        from huggingface_hub import try_to_load_from_cache
 
-        return isinstance(try_to_load_from_cache(_MODELS.get(model_name, model_name), "model.bin"), str)
-    except Exception:
-        return False
+        repo = _MODELS.get(model_name, model_name)
+    return os.path.join(os.path.expanduser(cache), "models--" + repo.replace("/", "--"))
 
 
+def model_cached(model_name):
+    """Czy model Whisper jest już pobrany: model.bin w snapshots/ pojawia się dopiero po pobraniu całego pliku."""
+    import glob
 
-def _dir_size(path):
-    """getsize, nie scandir: na Windows scandir podaje nieaktualny rozmiar pliku, który jest właśnie zapisywany."""
+    return bool(glob.glob(os.path.join(glob.escape(_model_dir(model_name)), "snapshots", "*", "model.bin")))
+
+
+def _downloaded_bytes(model_dir):
+    """Bajty pobrane do cache modelu: pliki w blobs/ (także *.incomplete) i — gdy system nie pozwala na
+    dowiązania (Windows bez trybu dewelopera) — pliki przeniesione do snapshots/. Dowiązań nie liczymy
+    podwójnie. getsize, nie scandir: na Windows scandir podaje nieaktualny rozmiar zapisywanego pliku."""
     total = 0
-    try:
-        for name in os.listdir(path):
+    for root, _, files in os.walk(model_dir):
+        for name in files:
+            path = os.path.join(root, name)
             try:
-                total += os.path.getsize(os.path.join(path, name))
+                if not os.path.islink(path):
+                    total += os.path.getsize(path)
             except OSError:
                 pass  # plik właśnie przenoszony
-    except OSError:
-        pass
     return total
 
 
 def download_model(model_name, progress=lambda done, total: None, cancel=None):
     """Pobiera model Whisper w osobnym procesie — anulowanie (cancel.set()) od razu go zabija.
-    Przerwane pobieranie zostawia częściowe pliki; następne je wznowi.
 
-    progress(done, total) w bajtach: postęp liczony z rozmiaru plików w cache (działa też z hf_xet)."""
+    progress(done, total) w bajtach: postęp liczony z rozmiaru plików w cache (działa też z hf_xet);
+    nigdy się nie cofa."""
     import subprocess
     import tempfile
     import time
 
-    from faster_whisper.utils import _MODELS
-    from huggingface_hub import constants
-
-    repo = _MODELS.get(model_name, model_name)
-    blobs = os.path.join(constants.HF_HUB_CACHE, "models--" + repo.replace("/", "--"), "blobs")
+    model_dir = _model_dir(model_name)
     total = int(WHISPER_SIZES.get(model_name, 0) * 1e9)
+    shown = 0
     win = sys.platform == "win32"
     code = "import sys; from faster_whisper.utils import download_model; download_model(sys.argv[1])"
     with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as err:
@@ -309,11 +328,14 @@ def download_model(model_name, progress=lambda done, total: None, cancel=None):
         try:
             while proc.poll() is None:
                 if cancel is not None and cancel.is_set():
-                    _kill_tree(proc)
-                    proc.wait()
                     raise Cancelled()
-                progress(min(_dir_size(blobs), total), total)
+                shown = max(shown, min(_downloaded_bytes(model_dir), total))
+                progress(shown, total)
                 time.sleep(0.4)
+        except BaseException:  # anulowanie, Ctrl+C w CLI, błąd w progress — proces pobierania nie może zostać
+            _kill_tree(proc)
+            proc.wait()
+            raise
         finally:
             with _ACTIVE_LOCK:
                 _ACTIVE.discard(proc)
@@ -576,8 +598,9 @@ def write_subs(cues, path, max_chars=42, lang=None, max_lines=2):
                 f.write(f"{_ts(c.start, '.')} --> {_ts(c.end, '.')}\n{body}\n\n")
         elif fmt == "ass":
             f.write(ASS_HEADER)
-            for c in cues:  # „{…}” to w ASS znaczniki stylu, \N — nowa linia
-                body = text(c).replace("{", "(").replace("}", ")").replace("\n", "\\N")
+            for c in cues:  # „{…}” to w ASS znaczniki stylu, \N / \n / \h — znaki specjalne
+                # „\” + niewidoczna spacja: C:\new nie zamieni się w łamanie linii
+                body = text(c).replace("\\", "\\\u200b").replace("{", "(").replace("}", ")").replace("\n", "\\N")
                 f.write(f"Dialogue: 0,{_ts_ass(c.start)},{_ts_ass(c.end)},Default,,0,0,0,,{body}\n")
         elif fmt == "txt":
             f.write("\n".join(c.text.strip() for c in cues if c.text.strip()) + "\n")
@@ -622,7 +645,7 @@ def _read_ass(lines):
                 continue
             row = dict(zip(fields, row))
             text = re.sub(r"\{[^}]*\}", "", row["text"])  # znaczniki stylu
-            text = re.sub(r"\\[Nnh]", " ", text)
+            text = re.sub(r"\\[Nnh]", " ", text).replace("\\​", "\\")  # zabezpieczony „\” z write_subs
             try:
                 cues.append(Cue(_parse_ts(row["start"]), _parse_ts(row["end"]), " ".join(text.split())))
             except (KeyError, ValueError):
@@ -656,7 +679,8 @@ def _read_srt_vtt(lines, vtt):
             if "-->" in nxt or (vtt and not nxt.strip()):  # w WebVTT pusta linia kończy napis
                 break
             text.append(nxt.strip())
-        while text and (not text[-1] or text[-1].isdigit()):  # pusta linia i numer następnego napisu
+        # pusta linia i numer następnego napisu (SRT; w WebVTT pusta linia już zakończyła napis, a liczba to tekst)
+        while text and (not text[-1] or (not vtt and text[-1].isdigit())):
             text.pop()
         body = " ".join(x for x in text if x)
         if vtt:  # <v Jan>, <i>, <00:01.000>, &amp;
@@ -1345,7 +1369,8 @@ def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda
             return written
         cues = build_cues(words, o.chars, o.lines, lang=src)
         out = resolve(os.path.join(folder, f"{name}.{src}.{o.fmt}"), src)
-        if o.correct and (out or unique_targets(o.targets, src)):  # poprawka przyda się zapisowi lub tłumaczeniom
+        # poprawka tylko wtedy, gdy coś powstanie: zapis transkrypcji albo choć jedno niepominięte tłumaczenie
+        if o.correct and (out or any(decided.get(tgt, True) for tgt in unique_targets(o.targets, src))):
             check_cancel()
             try:
                 cues = correct(cues, src, o.engine, o.context, log, keys, o.settings,

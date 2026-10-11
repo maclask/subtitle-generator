@@ -8,8 +8,6 @@ LANG = "en"  # do wywołania set_lang()
 S = {
     # --- core: rozpoznawanie mowy
     "loading_model": ("Ładuję model {model} ({dev})…", "Loading model {model} ({dev})…"),
-    "downloading_model": ("Pobieram model {model} — tylko za pierwszym razem, to może potrwać kilka minut…",
-                          "Downloading model {model} — first time only, this may take a few minutes…"),
     "detected": ("Język mowy: {lang} (pewność {prob:.0%}), długość {mins:.1f} min",
                  "Spoken language: {lang} (confidence {prob:.0%}), duration {mins:.1f} min"),
     "lang_mismatch": ("UWAGA: wybrano język „{chosen}”, ale w nagraniu słychać „{detected}” (pewność {prob:.0%}). "
@@ -19,6 +17,8 @@ S = {
                       "instead of transcribing it."),
     "gpu_failed": ("GPU nie zadziałało ({err}). Przełączam na CPU — będzie wolniej.",
                    "GPU failed ({err}). Falling back to CPU — this will be slower."),
+    "model_not_downloaded": ("Model rozpoznawania mowy {model} nie jest pobrany.",
+                             "The {model} speech recognition model is not downloaded."),
     "download_failed": ("Nie udało się pobrać modelu {model}: {err}", "Couldn't download the {model} model: {err}"),
     "srt_empty": ("Nie znaleziono napisów w pliku: {path}", "No subtitles found in the file: {path}"),
     "cant_read_media": ("Nie da się odczytać dźwięku z pliku {name} — plik jest uszkodzony albo nie ma ścieżki audio.",
@@ -100,8 +100,7 @@ S = {
     "cancel": ("Anuluj", "Cancel"),
     "downloading": ("Pobieranie {model}… {done} / {total} GB", "Downloading {model}… {done} / {total} GB"),
     "model_downloaded": ("Pobrano model {model}.", "Downloaded the {model} model."),
-    "download_cancelled": ("Przerwano pobieranie modelu {model} (następne pobieranie je wznowi).",
-                           "Cancelled downloading {model} (the next download will resume it)."),
+    "download_cancelled": ("Przerwano pobieranie modelu {model}.", "Cancelled downloading {model}."),
     "no_model_skip": ("Pominięto {name}: brak modelu rozpoznawania mowy — pobierz go w sekcji Rozpoznawanie mowy.",
                       "Skipped {name}: no speech recognition model — download one in the Speech recognition section."),
     "correct_box": ("Popraw tekst przez LLM", "Proofread with an LLM"),
@@ -138,7 +137,6 @@ S = {
     "generate": ("Generuj napisy", "Generate subtitles"),
     "stop": ("Zatrzymaj", "Stop"),
     "stage_loading": ("Ładowanie modelu", "Loading model"),
-    "stage_download": ("Pobieranie modelu", "Downloading model"),
     "stage_stt": ("Rozpoznawanie mowy", "Speech recognition"),
     "stage_translate": ("Tłumaczenie: {lang}", "Translating: {lang}"),
     "stage_correct": ("Poprawianie transkrypcji", "Proofreading the transcript"),
@@ -160,23 +158,34 @@ S = {
     "working": ("Pracuję…", "Working…"),
     "add_first": ("Dodaj najpierw plik.", "Add a file first."),
     "done": ("Gotowe.", "Done."),
+    "done_skipped": ("Gotowe, pominięto ({n}): {files}", "Done, skipped ({n}): {files}"),
     "done_with_errors": ("Gotowe, z błędami ({n}): {files}", "Done, with errors ({n}): {files}"),
     "error": ("BŁĄD: {err}", "ERROR: {err}"),
 }
 
 
 class Msg(str):
-    """Tekst komunikatu, który pamięta swój klucz i parametry — po nich GUI dobiera wygląd wpisu w logu."""
+    """Tekst komunikatu, który pamięta swój klucz, parametry i język — po nich GUI dobiera wygląd wpisu w logu."""
 
-    def __new__(cls, text, key, kw):
+    def __new__(cls, text, key, kw, lang):
         msg = super().__new__(cls, text)
-        msg.key, msg.kw = key, kw
+        msg.key, msg.kw, msg.lang = key, kw, lang
         return msg
 
 
-def t(key, **kw):
-    text = S[key][0 if LANG == "pl" else 1]
-    return Msg(text.format(**kw) if kw else text, key, kw)
+def t(key, in_lang=None, **kw):
+    """in_lang: język tekstu (domyślnie bieżący) — np. żeby wpis logu po zmianie języka interfejsu
+    pozostał w języku, w którym powstał (parametry, jak nazwy języków, są już w nim sformatowane).
+    Nie „lang”: tak nazywa się parametr części komunikatów."""
+    lang = in_lang or LANG
+    text = S[key][0 if lang == "pl" else 1]
+    return Msg(text.format(**kw) if kw else text, key, kw, lang)
+
+
+def decimal(value, digits=1):
+    """Liczba z separatorem dziesiętnym języka interfejsu: 1,6 / 1.6."""
+    text = f"{value:.{digits}f}"
+    return text.replace(".", ",") if LANG == "pl" else text
 
 
 UI_LANGS = ("pl", "en")
