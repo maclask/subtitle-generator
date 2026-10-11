@@ -2,97 +2,108 @@
 
 **English** · [Polski](README.pl.md)
 
-Turn video or audio into ready-to-use subtitles (`.srt`, `.vtt`, `.ass`, or plain-text `.txt`) and translate them into other languages.
-The files work in Premiere Pro, DaVinci Resolve, Final Cut Pro, YouTube and other tools that accept SRT.
+Subtitle Generator creates subtitles from video and audio recordings and translates them into other languages. It supports SRT, WebVTT and ASS, as well as plain-text transcripts.
 
-- **Speech recognition:** Whisper large-v3 ([faster-whisper](https://github.com/SYSTRAN/faster-whisper)), running locally. Uses an NVIDIA GPU (CUDA) on Windows and Linux, and the CPU on macOS.
-- **Subtitle formatting:** subtitles are split at sentence and clause boundaries, with balanced lines and minimum display times.
-- **Translation:** choose Claude (CLI or API), Codex CLI, OpenAI, a local model through Ollama, any OpenAI-compatible API (OpenRouter, LM Studio, Mistral…), or DeepL. The timing of every subtitle is kept.
-- **GUI and command line** on Windows, macOS and Linux. The interface is available in English and Polish.
+## Features
+
+- **Speech recognition** runs locally with Whisper ([faster-whisper](https://github.com/SYSTRAN/faster-whisper)), GPU-accelerated on Windows and Linux (NVIDIA CUDA) and CPU-based on macOS.
+- **Subtitle segmentation** at sentence and phrase boundaries, with balanced line lengths and minimum display durations.
+- **Transcript proofreading** (optional) with a language model: corrects misrecognized words, proper names and punctuation without changing subtitle timing.
+- **Translation** with Claude (CLI or API), Codex CLI, the OpenAI API, local models in Ollama, any OpenAI-compatible API (e.g. OpenRouter, LM Studio), or DeepL. Subtitle timing is preserved.
+- **Graphical and command-line interfaces** on Windows, macOS and Linux, available in English and Polish.
 
 ## Requirements
 
-| Requirement | Details |
+| Component | Requirement |
 |---|---|
-| Python | 3.10 – 3.13 ([python.org](https://www.python.org/downloads/)) |
-| Disk | about 6 GB (CUDA libraries and the Whisper model) |
-| GPU (optional) | NVIDIA with a recent driver. Without one, the CPU is used, which is several times slower. |
-| Translation | one of the translators below. Transcription alone needs none. |
+| Python | 3.10–3.13 ([python.org](https://www.python.org/downloads/)) |
+| Disk space | up to about 6 GB (CUDA libraries and the Whisper model) |
+| GPU (optional) | NVIDIA GPU with a current driver; without one, transcription runs on the CPU, several times slower |
+| Translation and proofreading | one of the translators listed under [Translator setup](#translator-setup); not required for transcription alone |
 
 ## Installation
 
-Download the package for your system from [Releases](https://github.com/maclask/subtitle-generator/releases/latest):
+Installation packages are available under [Releases](https://github.com/maclask/subtitle-generator/releases/latest):
 
-| | GUI + command line | Command line only |
+| System | Graphical and command-line interface | Command line only |
 |---|---|---|
 | Windows | `subtitle-generator-<version>-windows.zip` | `subtitle-generator-cli-<version>-windows.zip` |
 | macOS | `subtitle-generator-<version>-macos.zip` | `subtitle-generator-cli-<version>-macos.zip` |
 | Linux | `subtitle-generator-<version>-linux.tar.gz` | `subtitle-generator-cli-<version>-linux.tar.gz` |
 
-The command-line package doesn't need tkinter, which makes it a good fit for servers.
+The command-line package does not require tkinter and is intended for systems without a desktop environment, such as servers.
 
 ### Windows
 
-1. Install Python 3.13 from [python.org](https://www.python.org/downloads/). Keep the **py launcher** option enabled in the installer.
-2. Unpack the Windows package, or run `git clone https://github.com/maclask/subtitle-generator`.
-3. Double-click **`setup.bat`**. It creates a local environment in `.venv` and installs dependencies. This takes a few minutes.
-4. Start the app with the **Subtitle Generator** shortcut (setup adds it to the app folder and the Start menu), or with `generator.bat`. Use `generator-cli.bat` for the command line.
+1. Install Python 3.13 from [python.org](https://www.python.org/downloads/), keeping the **py launcher** option selected.
+2. Extract the package or clone the repository: `git clone https://github.com/maclask/subtitle-generator`.
+3. Run **`setup.bat`**. The script creates a virtual environment in `.venv` and installs the dependencies.
+4. Start the application with the **Subtitle Generator** shortcut (in the application folder and the Start menu) or with `generator.bat`. For the command line, use `generator-cli.bat`.
 
 ### macOS
 
-1. Install Python 3.13 from [python.org](https://www.python.org/downloads/), which includes tkinter. With Homebrew, run `brew install python@3.13 python-tk@3.13` instead.
-2. Unpack the macOS package, or clone the repository.
-3. In Terminal, in the project folder, run:
+1. Install Python 3.13 from [python.org](https://www.python.org/downloads/) (includes tkinter) or with Homebrew: `brew install python@3.13 python-tk@3.13`.
+2. Extract the package or clone the repository.
+3. In the application folder, run:
    ```sh
    sh setup.sh
    ```
-4. Start **Subtitle Generator.app** (setup creates it in the app folder; drag it to the Dock or Applications if you like), or run `./generator.sh`.
+4. Start **Subtitle Generator.app** (created in the application folder) or run `./generator.sh`.
 
-> If macOS blocks the app the first time, right-click it, choose **Open**, then confirm.
+> macOS may block the application on first launch. To open it, choose **Open** from the application's context menu and confirm.
 
 ### Linux
 
-1. Install Python with tkinter and venv:
+1. Install Python with the tkinter and venv modules:
    ```sh
    sudo apt install python3 python3-tk python3-venv   # Debian / Ubuntu
    sudo dnf install python3 python3-tkinter          # Fedora
    ```
-2. Unpack the Linux package (`tar xzf subtitle-generator-*-linux.tar.gz`), or clone the repository.
-3. In the project folder, run:
+2. Extract the package (`tar xzf subtitle-generator-*-linux.tar.gz`) or clone the repository.
+3. In the application folder, run:
    ```sh
    sh setup.sh
    ```
-4. Start **Subtitle Generator** from the application menu (setup adds the entry), or run `./generator.sh`.
+4. Start **Subtitle Generator** from the application menu or run `./generator.sh`.
 
-Download a Whisper model in the app, in the **Speech recognition** section: `large-v3-turbo` (1.6 GB, recommended), `large-v3` (3.1 GB, most accurate) or `medium` (1.5 GB). A download can be cancelled and the next one resumes it. Until a model is downloaded, the model selector is disabled and video/audio files are skipped. Translating existing subtitle files works without a model. The command-line version downloads the chosen model on the first transcription.
+### Whisper models
+
+The speech recognition model is downloaded from within the application, in the **Speech recognition** section:
+
+| Model | Size | Characteristics |
+|---|---|---|
+| `large-v3-turbo` | 1.6 GB | fast, accuracy close to `large-v3` (recommended) |
+| `large-v3` | 3.1 GB | highest accuracy |
+| `medium` | 1.5 GB | lower accuracy |
+
+Downloads can be cancelled. Until a model is downloaded, video and audio files are skipped, while translation of existing subtitle files remains available. The command-line version asks for confirmation before downloading a missing model (`large-v3` by default); in scripts, `--download-model` downloads it without asking. Without a model, video and audio files are skipped.
 
 ## Translator setup
 
 | Translator | Setup |
 |---|---|
-| **Claude CLI** (default) | Install [Claude Code](https://claude.com/claude-code), run `claude` once and sign in with `/login`. No API key is needed. The app finds `claude` on your PATH or inside the Claude desktop app. |
-| **Claude API** | Paste an [Anthropic API key](https://console.anthropic.com/), or set `ANTHROPIC_API_KEY`. |
-| **Codex CLI** | `npm install -g @openai/codex`, then `codex login`. Uses your ChatGPT account. Codex is an agent that can read files on your computer (read-only sandbox), so for subtitles from untrusted sources prefer another translator. |
-| **OpenAI API** | Paste an [OpenAI API key](https://platform.openai.com/api-keys) (or set `OPENAI_API_KEY`) and enter a model name. |
-| **Ollama (local)** | Install [Ollama](https://ollama.com) and pull a model, e.g. `ollama pull qwen3`. Installed models appear in the list. Runs offline, but large models are slow on GPUs with little VRAM. |
-| **Custom API** | Any OpenAI-compatible endpoint: server URL, model, and an optional key (`CUSTOM_API_KEY`). Examples: `https://openrouter.ai/api/v1`, LM Studio `http://localhost:1234/v1`. |
-| **DeepL** | Paste a [DeepL API key](https://www.deepl.com/pro-api) (the Free plan works), or set `DEEPL_API_KEY`. Supports only DeepL's languages; use an LLM translator for the rest. |
+| **Claude CLI** (default) | Install [Claude Code](https://claude.com/claude-code), run `claude` and sign in with `/login`. No API key is required. The application looks for `claude` on the PATH and in the Claude desktop application. |
+| **Claude API** | An [Anthropic API key](https://console.anthropic.com/) or the `ANTHROPIC_API_KEY` variable. |
+| **Codex CLI** | `npm install -g @openai/codex`, then `codex login` (ChatGPT account). Codex runs as an agent with read access to local files; for subtitles from untrusted sources, another translator is recommended. |
+| **OpenAI API** | An [OpenAI API key](https://platform.openai.com/api-keys) or the `OPENAI_API_KEY` variable, and a model name. |
+| **Ollama** | Install [Ollama](https://ollama.com) and pull a model, e.g. `ollama pull qwen3`. Installed models appear in the list. Works offline; performance depends on available GPU memory. |
+| **Custom API** | Any OpenAI-compatible server: URL, model and an optional key (`CUSTOM_API_KEY`), e.g. `https://openrouter.ai/api/v1` or LM Studio at `http://localhost:1234/v1`. |
+| **DeepL** | A [DeepL API key](https://www.deepl.com/pro-api) (the Free plan is supported) or the `DEEPL_API_KEY` variable. Supports DeepL languages only and does not perform transcript proofreading. |
 
-Keys you enter in the app are stored in the system keychain: Credential Manager on Windows, Keychain on macOS, and Secret Service (GNOME Keyring or KWallet) on Linux. They are not stored in `config.json` or anywhere else in the project folder.
+API keys entered in the application are stored in the system credential store: Credential Manager (Windows), Keychain (macOS), or Secret Service — GNOME Keyring or KWallet (Linux). They are not written to any application file.
 
 ## Usage
 
-### GUI
+### Graphical interface
 
-The app starts in the system language (Polish or English; English for any other system language). The **PL / EN** switch in the top-right corner changes it, and the choice is remembered.
+The interface language follows the system language (English or Polish; English for all other languages). The **PL / EN** switch changes the language, and the choice is saved.
 
-1. **Add files**: drag them onto the window or use **Add files…**. You can add video, audio, or existing `.srt` / `.vtt` / `.ass` subtitles (translated without transcription). Dragging a folder adds all supported files in it. Hover over a file name to see its full path.
-2. Choose the **spoken language** (auto-detect by default) and the **model**. `large-v3` is the most accurate; `large-v3-turbo` is several times faster. If the selected model isn't downloaded, a **Download** button appears below. If the selected language clearly doesn't match the recording, the detected language is used and the log says so.
-   **Proofread with an LLM**: after speech recognition, the translator chosen in the Translation section fixes misheard words, proper names and punctuation, helped by the **Context** field (e.g. people's names or equipment). Timing stays the same, and translations are made from the corrected text. A correction that strays too far from the original (the model rewrote the sentence instead of fixing it) is rejected. If proofreading fails, the Whisper text is saved. Not available with DeepL.
-3. Optionally pick **target languages** and a translator. For API translators, the model list fills in from your account once the key is entered. Use **Other languages** for anything not in the list (LLM translators only).
-4. Under **Subtitle format**, pick the file type: **SRT** (most widely supported), **WebVTT** (web, HTML5 players), **ASS** (Aegisub, VLC, mpv — styled as white text with an outline) or **TXT** (text only, no timing — e.g. an interview transcript).
-5. Optionally add **context**: topic, proper names, a glossary, or a rule such as *keep the brand name untranslated*.
-6. Click **Generate subtitles** (it turns into **Stop** while working). Files are saved next to the source as `name.pl.srt`, `name.en.srt`, and so on (the extension follows the chosen file type). **Open folder** shows the results. The **Log** shows progress for each file separately: saved files (✓), warnings (!) and errors (✕).
+1. **Files** — add video or audio recordings, or existing `.srt`, `.vtt` or `.ass` subtitles (translation only, no transcription; set the subtitle language in **Spoken language**). Files can be dragged into the window; dragging a folder adds all supported files in it.
+2. **Speech recognition** — select the spoken language (detected automatically by default) and the model. If the selected language clearly does not match the recording, the detected language is used and a warning is shown in the log.
+   The **Proofread with an LLM** option enables transcript proofreading: after transcription, the translator selected in the **Translation** section corrects misrecognized words, proper names and punctuation, using the **Context** field. Subtitle timing is unchanged, and translations are based on the corrected text. Corrections that deviate substantially from the original are rejected; if proofreading fails, the speech recognition output is saved.
+3. **Subtitle format** — file type, maximum characters per line and lines per subtitle.
+4. **Translation** — select the translator and target languages. Languages not in the list can be entered in **Other languages** (LLM translators only). The **Context** field accepts the topic, proper names, a glossary or rules, e.g. *do not translate the brand name*.
+5. Click **Generate subtitles**. Progress for each file is shown in the **Log** column; **Open folder** shows the saved files.
 
 ### Command line
 
@@ -103,49 +114,51 @@ generator-cli.bat video.mp4 -l en -t pl,de          # Windows
 
 | Option | Description |
 |---|---|
-| `-l en` | spoken / subtitle language (code or name); detected if omitted |
-| `-t pl,de,catalan` | target languages; names not in `--list-languages` work with every translator except DeepL |
-| `-e cli\|api\|codex\|openai\|ollama\|custom\|deepl` | translator (default: the one last used in the GUI, otherwise `cli`) |
+| `-l en` | spoken or subtitle language (code or name); detected automatically by default, required for subtitle files |
+| `-t pl,de,catalan` | target languages; languages not in `--list-languages` are supported by all translators except DeepL |
+| `-e cli\|api\|codex\|openai\|ollama\|custom\|deepl` | translator (default: the one last used in the graphical interface, otherwise `cli`) |
 | `--llm-model`, `--llm-url` | model for `api`, `openai`, `ollama`, `custom`; server URL for `ollama`, `custom` |
-| `-m large-v3-turbo` | Whisper model: `large-v3`, `large-v3-turbo`, `medium` |
-| `-c "…"` | context for the translator |
-| `-o folder` | output folder (default: next to the source file) |
-| `-f vtt` | file type: `srt` (default), `vtt`, `ass`, `txt` |
-| `--correct` | proofread the transcript with the `-e` LLM translator (not DeepL) |
-| `--chars 42 --lines 2` | subtitle layout |
-| `--overwrite` | overwrite existing subtitle files (by default a copy such as `video.en (2).srt` is saved) |
-| `--ui-lang en` | message language (`en` or `pl`); defaults to the system language, English for anything other than Polish |
+| `-m large-v3-turbo` | Whisper model: `large-v3` (default), `large-v3-turbo`, `medium` |
+| `--download-model` | download a missing Whisper model without asking (e.g. in scripts) |
+| `--correct` | proofread the transcript with the translator given in `-e` (except DeepL) |
+| `-c "…"` | context for proofreading and translation |
+| `-f vtt` | file format: `srt` (default), `vtt`, `ass`, `txt` |
+| `--chars 42 --lines 2` | maximum characters per line and lines per subtitle |
+| `-o folder` | output folder (default: the source file's folder) |
+| `--overwrite` | overwrite existing files (by default a copy is saved, e.g. `video.en (2).srt`) |
+| `--ui-lang en` | message language: `en` or `pl` (defaults to the language chosen in the graphical interface, otherwise the system language) |
 
-### Recommended workflow for editing
+### Recommended editing workflow
 
 1. Generate subtitles in the spoken language.
-2. Import the `.srt` into your editor and correct it there.
-3. Export the corrected subtitles as SRT.
-4. Add the corrected `.srt` to the app and translate it. Translations then start from the corrected text.
+2. Import them into your editing software (e.g. in Premiere Pro: **File → Import**) and make corrections.
+3. Export the corrected subtitles to an SRT file.
+4. Add the corrected file to the generator, set its language and translate it — translations will be based on the approved text.
 
-In Premiere Pro: **File → Import**, select the `.srt` and drag it onto the timeline.
+## Output files
 
-### Encoding and line endings
+Files are saved in the source file's folder as `name.<language code>.<extension>`, e.g. `video.en.srt`, `video.pl.srt`.
 
-Subtitle files are saved as **UTF-8** (without a BOM). Every current tool reads it: Premiere Pro, DaVinci Resolve, Final Cut Pro, YouTube, VLC. It also covers every supported language, including Chinese, Arabic and Greek.
+| Format | Extension | Use |
+|---|---|---|
+| SRT | `.srt` | universal format: editing software, video platforms, media players |
+| WebVTT | `.vtt` | HTML5 players and web services |
+| ASS | `.ass` | Aegisub, VLC, mpv; includes a style (white text with an outline) |
+| TXT | `.txt` | text only, without timecodes |
 
-Line endings depend on the system: `CRLF` on Windows, `LF` on macOS and Linux. All of the tools above handle both.
-
-There is no option to change the encoding. If an old device (e.g. a TV or a DVD player reading from USB) shows garbled characters, convert the file with Notepad++ or Subtitle Edit (e.g. to Windows-1250 for Central European languages).
-
-Files loaded for translation can be UTF-8, UTF-16 or Windows-1250/1252 — the encoding is detected automatically.
+**Encoding.** Files are saved as UTF-8 without a byte order mark. Line endings follow the operating system convention (CRLF on Windows, LF on macOS and Linux). The output encoding is not configurable; if a target device requires a single-byte encoding such as Windows-1250, convert the file with an external tool (e.g. Subtitle Edit). Input files can be encoded as UTF-8, UTF-16 (with a byte order mark) or Windows-1250.
 
 ## Troubleshooting
 
-| Problem | Fix |
+| Message or symptom | Solution |
 |---|---|
-| *GPU failed … falling back to CPU* | Update the NVIDIA driver. Transcription still works on the CPU, just more slowly. |
+| *GPU failed … falling back to CPU* | Update the NVIDIA driver. Transcription continues on the CPU. |
 | *Claude CLI: Failed to authenticate* | Run `claude` in a terminal and sign in with `/login`. |
-| Ollama translation is very slow | Choose a smaller model that fits in your GPU memory (e.g. 7–14B parameters). |
+| Slow translation with Ollama | Choose a smaller model that fits in GPU memory (e.g. 7–14B parameters). |
 | *No system keychain available* (Linux) | Install and unlock GNOME Keyring or KWallet, or set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `CUSTOM_API_KEY` or `DEEPL_API_KEY`. |
-| `setup` cannot find Python | Install Python 3.10–3.13. Newer versions may not have every dependency yet. |
+| `setup` cannot find Python | Install Python 3.10–3.13; newer versions may not be supported by all dependencies. |
 
-Settings (without keys) are saved in `config.json` in the project folder.
+Application settings (excluding API keys) are saved in `config.json` in the application folder.
 
 ## License
 
