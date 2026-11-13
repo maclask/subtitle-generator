@@ -1275,7 +1275,7 @@ def save_config(cfg):
     os.replace(tmp, CONFIG)
 
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 KEYRING_SERVICE = "subtitle-generator"
 OLD_KEYRING_SERVICE = "generator-napisow"  # nazwa z wersji przed 1.0
