@@ -33,6 +33,8 @@ Pakiety instalacyjne są dostępne w sekcji [Releases](https://github.com/maclas
 
 Pakiet „tylko wiersz poleceń” nie wymaga biblioteki tkinter i jest przeznaczony do systemów bez środowiska graficznego, np. serwerów.
 
+Do samego tłumaczenia istniejących plików napisów (bez rozpoznawania mowy) wystarczy zainstalować w środowisku wirtualnym `requirements-translate.txt` zamiast `requirements-cli.txt` i uruchamiać nim `cli.py`. Pomija to Whisper i biblioteki CUDA (ok. 85 MB zamiast kilku GB).
+
 ### Windows
 
 1. Zainstaluj Python 3.13 z [python.org](https://www.python.org/downloads/), pozostawiając zaznaczoną opcję **py launcher**.
@@ -98,7 +100,7 @@ Klucze API wprowadzone w programie są przechowywane w systemowym magazynie poś
 
 Język interfejsu odpowiada językowi systemu (polski lub angielski; dla pozostałych języków — angielski). Przełącznik **PL / EN** zmienia język, a wybór jest zapamiętywany.
 
-1. **Pliki** — dodaj nagrania wideo lub audio albo istniejące napisy `.srt`, `.vtt` lub `.ass` (tylko tłumaczenie, bez transkrypcji; język napisów należy wtedy wskazać w polu **Język mowy**). Pliki można przeciągnąć do okna; przeciągnięcie katalogu dodaje wszystkie obsługiwane pliki.
+1. **Pliki** — dodaj nagrania wideo lub audio albo istniejące napisy `.srt`, `.vtt`, `.ass` lub napisy MicroDVD i MPL2 (`.sub`, `.txt`) (tylko tłumaczenie, bez transkrypcji; język napisów należy wtedy wskazać w polu **Język mowy**). Pliki można przeciągnąć do okna; przeciągnięcie katalogu dodaje wszystkie obsługiwane pliki.
 2. **Rozpoznawanie mowy** — wybierz język mowy (domyślnie wykrywany automatycznie) i model. Jeśli wybrany język wyraźnie nie odpowiada nagraniu, użyty zostaje język wykryty, a w logu pojawia się ostrzeżenie.
    Opcja **Popraw tekst przez LLM** włącza korektę transkrypcji: po rozpoznaniu mowy tłumacz wybrany w sekcji **Tłumaczenie** koryguje błędnie rozpoznane słowa, nazwy własne i interpunkcję, korzystając z pola **Kontekst**. Czasy napisów pozostają bez zmian, a tłumaczenia powstają z poprawionego tekstu. Poprawki odbiegające znacząco od oryginału są odrzucane; w razie błędu zapisywany jest tekst z rozpoznawania mowy.
 3. **Format napisów** — typ pliku, maksymalna liczba znaków w linii i liczba linii w napisie.
@@ -126,6 +128,9 @@ generator-cli.bat film.mp4 -l pl -t en,de          # Windows
 | `--chars 42 --lines 2` | maksymalna liczba znaków w linii i linii w napisie |
 | `-o katalog` | katalog wyjściowy (domyślnie katalog pliku źródłowego) |
 | `--overwrite` | nadpisywanie istniejących plików (domyślnie zapisywana jest kopia, np. `film.en (2).srt`) |
+| `--jobs 4` | liczba części jednego tłumaczenia wysyłanych do tłumacza jednocześnie (domyślnie 1, najwyżej 16; Ollama: 1); szybciej, kosztem kontekstu między częściami. Do 4 języków docelowych jest tłumaczonych jednocześnie, każdy w tylu częściach |
+| `--fps 25` | liczba klatek na sekundę dla napisów MicroDVD (domyślnie z pierwszej linii pliku, w przeciwnym razie 23,976) |
+| `--json` | komunikaty, postęp i zapisane pliki jako JSON, jeden obiekt na linię (do użycia przez inne programy) |
 | `--ui-lang pl` | język komunikatów: `pl` lub `en` (domyślnie język wybrany w interfejsie graficznym, a w jego braku język systemu) |
 
 ### Zalecany proces redakcji
@@ -154,6 +159,7 @@ Pliki są zapisywane w katalogu pliku źródłowego jako `nazwa.<kod języka>.<r
 |---|---|
 | *GPU nie zadziałało… przełączam na CPU* | Zaktualizuj sterownik NVIDIA. Transkrypcja jest kontynuowana na procesorze. |
 | *Claude CLI: Failed to authenticate* | Uruchom `claude` w terminalu i zaloguj się poleceniem `/login`. |
+| *Tłumacz nie odpowiedział w ciągu 240 s* | Część jest automatycznie ponawiana raz. Jeśli błąd się powtórzy, sprawdź połączenie z siecią i tłumacza (dla Claude CLI: uruchom `claude` i zaloguj się). |
 | Wolne tłumaczenie przez Ollamę | Wybierz mniejszy model, mieszczący się w pamięci GPU (np. 7–14 mld parametrów). |
 | *Brak systemowego magazynu haseł* (Linux) | Zainstaluj i odblokuj GNOME Keyring lub KWallet albo ustaw zmienne `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `CUSTOM_API_KEY` lub `DEEPL_API_KEY`. |
 | Skrypt `setup` nie znajduje Pythona | Zainstaluj Python w wersji 3.10–3.13; nowsze wersje mogą nie być obsługiwane przez wszystkie zależności. |

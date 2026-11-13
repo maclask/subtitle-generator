@@ -16,7 +16,7 @@ import zipfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIST = os.path.join(ROOT, "dist")
 
-COMMON = ["LICENSE", "README.md", "README.pl.md", "core.py", "i18n.py", "cli.py", "requirements-cli.txt"]
+COMMON = ["LICENSE", "README.md", "README.pl.md", "core.py", "i18n.py", "cli.py", "requirements-cli.txt", "requirements-translate.txt"]
 GUI = ["gui.py", "requirements.txt", "shortcuts.py", "assets/icon.png", "assets/icon.ico", "assets/icon.icns"]
 SYSTEMS = {
     "windows": {"cli": ["setup.bat", "generator-cli.bat"], "gui": ["generator.bat"], "fmt": "zip"},

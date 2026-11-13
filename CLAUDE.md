@@ -27,12 +27,14 @@ README exists in EN (`README.md`) and PL (`README.pl.md`) — keep both in sync,
 |---|---|
 | `core.py` (~1430 lines) | all logic, no Tk; shared by GUI and CLI |
 | `gui.py` (~1260) | customtkinter app (`App`), worker thread + queue |
-| `cli.py` (~170) | argparse front end; adds its own strings to `i18n.S` |
+| `cli.py` (~190) | argparse front end; adds its own strings to `i18n.S`; `--json` = one JSON object per line (`log`/`error`/`progress`/`saved`) for programs (Stremio add-on) |
 | `i18n.py` (~235) | `S` dict of `key: (pl, en)`, `t()`, language detection |
 | `shortcuts.py` | creates launchers/shortcuts (run by setup scripts) |
 | `tools/make_icons.py` | regenerates `assets/icon.{png,ico,icns}` (each size drawn separately) |
 | `tools/build_release.py` | builds 6 archives into `dist/` from **HEAD** (not working tree) |
 | `setup.bat` / `setup.sh` | create `.venv`, install `requirements*.txt`, run `shortcuts.py` |
+| `requirements-translate.txt` | translate-only deps (no Whisper/CUDA); `requirements-cli.txt` includes it via `-r` |
+| `test_core.py` | offline self-check (formats, parallel LLM parts, timeouts): `python test_core.py` |
 
 ## core.py sections (in file order)
 
@@ -46,11 +48,12 @@ README exists in EN (`README.md`) and PL (`README.pl.md`) — keep both in sync,
 - Segmentation: `build_cues` (sentence/clause aware), `fix_timing`, `wrap` (balanced lines, Polish typography).
 - Formats: `FORMATS` {srt, vtt, ass, txt}, `SUB_EXT` (readable inputs), `is_subtitle`, `write_subs`
   (format by extension; VTT escapes `& < >`, ASS escapes `{}` and `\`), `read_subs` → `_read_ass` /
-  `_read_srt_vtt`, `_read_text` (UTF-8/UTF-16 BOM/cp1250).
+  `_read_srt_vtt`, `_read_frames` (MicroDVD/MPL2 in `.sub`/`.txt`, fps from `{1}{1}25` header or `fps` arg),
+  `_read_text` (UTF-8/UTF-16 BOM/cp1250).
 - LLM: `ENGINES`, `ENGINE_FIELDS`, `ENGINE_KEY`, `DEFAULTS`, JSON `SCHEMA` (`{"translations":[{id,text}]}`
   used for both tasks), prompts `SYSTEM` (translate) and `SYSTEM_CORRECT` (proofread).
   `_llm(engine, keys, settings)` → `(ask, chunk)`; `_llm_cues(..., task="translate"|"correct")` batches
-  with retries; `translate()`; `correct()` (rejects changes with difflib ratio < 0.5); per-engine
+  with retries (`jobs` > 1 = parts in parallel; `LLM_TIMEOUT` per part → `LLMTimeout`, one retry); `translate()`; `correct()` (rejects changes with difflib ratio < 0.5); per-engine
   `_ask_cli/_ask_api/_ask_codex/_ask_openai`, `_translate_deepl`. `check_engine`, `engine_info`, `list_models`.
 - Config/keys: `CONFIG` path, `WHISPER_MODELS/SIZES/RECOMMENDED`, `MEDIA_EXT`, `load_config`/`save_config`
   (atomic), keyring `set_key`/`api_keys` (env fallbacks `KEY_ENV`). `__version__`.

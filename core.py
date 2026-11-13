@@ -79,6 +79,13 @@ class AlreadyReported(Exception):
     """Błąd został już wypisany w logu (np. wszystkie tłumaczenia się nie udały)."""
 
 
+LLM_TIMEOUT = 240  # s na jedną partię napisów; dłużej = tłumacz się zawiesił
+
+
+class LLMTimeout(RuntimeError):
+    pass
+
+
 def check_cancel():
     if CANCEL.is_set():
         raise Cancelled()
@@ -116,10 +123,12 @@ def kill_active():
         _kill_tree(proc)
 
 
-def _run_proc(cmd, input_text, cwd=None):
-    """subprocess.run, który da się przerwać przyciskiem Stop (zabija całe drzewo procesów)."""
+def _run_proc(cmd, input_text, cwd=None, timeout=None):
+    """subprocess.run, który da się przerwać przyciskiem Stop (zabija całe drzewo procesów).
+    Po timeout s zabija proces i zgłasza LLMTimeout."""
     import subprocess
     import tempfile
+    import time
 
     win = sys.platform == "win32"
     flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if win else 0
@@ -133,6 +142,7 @@ def _run_proc(cmd, input_text, cwd=None):
             _ACTIVE.add(proc)
         try:
             pending = input_text
+            started = time.monotonic()
             while True:
                 try:
                     out, err = proc.communicate(pending, timeout=0.3)
@@ -141,9 +151,15 @@ def _run_proc(cmd, input_text, cwd=None):
                     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
                 except subprocess.TimeoutExpired:
                     pending = None  # stdin wysłane przy pierwszym wywołaniu
-                    if CANCEL.is_set():
+                    hung = timeout and time.monotonic() - started > timeout
+                    if CANCEL.is_set() or hung:
                         _kill_tree(proc)
-                        proc.communicate()
+                        try:  # wnuk, którego nie dało się zabić, może trzymać potok — nie czekamy w nieskończoność
+                            proc.communicate(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            pass
+                        if hung:
+                            raise LLMTimeout(t("llm_timeout_failed", s=timeout))
                         raise Cancelled()
         finally:
             with _ACTIVE_LOCK:
@@ -546,11 +562,20 @@ FORMATS = {
     "ass": "ASS",
     "txt": "TXT",  # sam tekst, bez czasów
 }
-SUB_EXT = (".srt", ".vtt", ".ass")  # pliki napisów, które da się wczytać do tłumaczenia
+SUB_EXT = (".srt", ".vtt", ".ass", ".sub", ".txt")  # pliki napisów do tłumaczenia (.sub/.txt: MicroDVD, MPL2)
 
 
 def is_subtitle(path):
     return path.lower().endswith(SUB_EXT)
+
+
+def looks_like_subs(path):
+    """Czy plik tekstowy zawiera napisy (czasy SRT/VTT, MicroDVD albo MPL2), a nie zwykły tekst."""
+    try:
+        head = _read_text(path)[:4000]
+    except OSError:
+        return False
+    return "-->" in head or any(_MICRODVD.match(x.strip()) or _MPL2.match(x.strip()) for x in head.splitlines()[:5])
 
 
 def _ts(t, sep=","):
@@ -653,13 +678,53 @@ def _read_ass(lines):
     return sorted(cues, key=lambda c: c.start)
 
 
-def read_subs(path):
-    """Napisy z pliku .srt / .vtt / .ass (sam tekst, bez formatowania)."""
+def read_subs(path, fps=None):
+    """Napisy z pliku .srt / .vtt / .ass / MicroDVD / MPL2 (sam tekst, bez formatowania).
+    fps: klatki/s dla MicroDVD; domyślnie z pierwszej linii pliku ({1}{1}23.976), a gdy jej brak — 23.976."""
     lines = _read_text(path).replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    cues = _read_ass(lines) if path.lower().endswith(".ass") else _read_srt_vtt(lines, path.lower().endswith(".vtt"))
+    first = next((line.strip() for line in lines if line.strip()), "")
+    if path.lower().endswith(".ass"):
+        cues = _read_ass(lines)
+    elif _MICRODVD.match(first) or _MPL2.match(first):  # po pierwszej linii: „-->” w tekście nie zmyli
+        cues = _read_frames(lines, fps)
+    else:
+        cues = _read_srt_vtt(lines, path.lower().endswith(".vtt"))
     if not cues:
         raise RuntimeError(t("srt_empty", path=path))
     return cues
+
+
+_MICRODVD = re.compile(r"^\{(\d+)\}\{(\d*)\}(.*)")   # {klatka}{klatka}tekst
+_MPL2 = re.compile(r"^\[(\d+)\]\[(\d*)\](.*)")       # [ds][ds]tekst (dziesiąte części sekundy)
+
+
+def _read_frames(lines, fps=None):
+    """MicroDVD i MPL2 (np. z NapiProjektu): „|” dzieli linie, „/” na początku linii to kursywa."""
+    rows = []
+    for line in lines:
+        line = line.strip()
+        if m := _MICRODVD.match(line):
+            a, z, text = m.groups()
+            header = re.fullmatch(r"\d+(?:[.,]\d+)?", text.strip())
+            if not rows and a in ("0", "1") and header and 10 <= float(header[0].replace(",", ".")) <= 120:
+                fps = fps or float(header[0].replace(",", "."))  # pierwsza linia {1}{1}23.976 = klatki/s
+                continue
+            rows.append((int(a), int(z) if z else None, text, True))
+        elif m := _MPL2.match(line):
+            a, z, text = m.groups()
+            rows.append((int(a), int(z) if z else None, text, False))
+    rate = fps or 23.976
+    cues = []
+    for a, z, text, frames in rows:
+        div = rate if frames else 10
+        text = re.sub(r"\{[^}]*\}", "", text)  # {y:i}, {c:$0000ff}…
+        text = " ".join(" ".join(part.lstrip("/").split()) for part in text.split("|")).strip()
+        cues.append(Cue(a / div, z / div if z is not None else None, text))
+    cues.sort(key=lambda c: c.start)
+    for i, c in enumerate(cues):  # brak czasu końca: do następnego napisu, najwyżej 5 s
+        if c.end is None:
+            c.end = min(cues[i + 1].start, c.start + 5) if i + 1 < len(cues) else c.start + 5
+    return [c for c in cues if c.text]
 
 
 def _read_srt_vtt(lines, vtt):
@@ -785,14 +850,15 @@ def engine_setting(settings, engine, field):
     return (settings or {}).get(key) or DEFAULTS.get(key, "")
 
 
-def translate(cues, src, tgt, engine, context, log, keys, settings=None, progress=lambda v: None):
-    """engine: klucz z ENGINES; keys: klucze API; settings: modele / adresy (openai_model, custom_url…)."""
+def translate(cues, src, tgt, engine, context, log, keys, settings=None, progress=lambda v: None, jobs=1):
+    """engine: klucz z ENGINES; keys: klucze API; settings: modele / adresy (openai_model, custom_url…); jobs: partie naraz."""
     log(t("translating", src=lang_name(src), tgt=lang_name(tgt), engine=ENGINES[engine], n=len(cues)))
     if engine == "deepl":
         return _translate_deepl(cues, src, tgt, context, keys.get("deepl", ""), progress)
     ask, chunk = _llm(engine, keys, settings)
     system = SYSTEM.format(src=_llm_lang(src), tgt=_llm_lang(tgt))
-    return _llm_cues(cues, system, context, log, ask, chunk, progress)
+    jobs = min(jobs, PARALLEL.get(engine, jobs))  # np. Ollama na jednym GPU: jedno zapytanie naraz
+    return _llm_cues(cues, system, context, log, ask, chunk, progress, jobs=jobs)
 
 
 SYSTEM_CORRECT = """You proofread automatic speech recognition (ASR) output that will be used as {lang} subtitles for video.
@@ -833,9 +899,10 @@ def _llm(engine, keys, settings=None):
     if engine == "api":
         import anthropic
 
-        client = anthropic.Anthropic(api_key=keys.get("anthropic") or None)
+        # max_retries=0: biblioteka ponawiałaby też przekroczenie czasu (3 × LLM_TIMEOUT) — ponawiamy sami
+        client = anthropic.Anthropic(api_key=keys.get("anthropic") or None, timeout=LLM_TIMEOUT, max_retries=0)
         model = engine_setting(settings, "api", "model")
-        ask = lambda system, user: _ask_api(client, model, system, user)
+        ask = _api_retries(lambda system, user: _ask_api(client, model, system, user), anthropic)
     elif engine == "codex":
         exe = _find_exe("codex", t("codex_missing"))
         ask = lambda system, user: _ask_codex(exe, system, user)
@@ -847,14 +914,34 @@ def _llm(engine, keys, settings=None):
         if not model or (engine == "custom" and not url):
             raise RuntimeError(t("llm_setup"))
         key = keys.get("openai") if engine == "openai" else (keys.get("custom") or "none")
-        client = openai.OpenAI(api_key=key or None, base_url=url)
-        ask = lambda system, user: _ask_openai(client, model, system, user)
+        client = openai.OpenAI(api_key=key or None, base_url=url, timeout=LLM_TIMEOUT, max_retries=0)
+        ask = _api_retries(lambda system, user: _ask_openai(client, model, system, user), openai)
         if engine != "openai":
             chunk = 25  # lokalne modele mają zwykle małe okno kontekstu
     else:
         exe = find_claude()
         ask = lambda system, user: _ask_cli(exe, system, user)
     return ask, chunk
+
+
+def _api_retries(ask, sdk):
+    """sdk: moduł anthropic albo openai (te same nazwy wyjątków).
+    Przekroczenie czasu → LLMTimeout (jedną powtórkę robi _llm_cues); przeciążenie, limit zapytań, błąd serwera
+    lub połączenia — do 2 powtórek z przerwą, jak domyślnie w bibliotece."""
+    import time
+
+    def wrapped(system, user):
+        for attempt in range(3):
+            try:
+                return ask(system, user)
+            except sdk.APITimeoutError as e:  # podklasa APIConnectionError — musi być pierwsza
+                raise LLMTimeout(t("llm_timeout_failed", s=LLM_TIMEOUT)) from e
+            except (sdk.RateLimitError, sdk.InternalServerError, sdk.APIConnectionError):
+                if attempt == 2:
+                    raise
+                check_cancel()
+                time.sleep(5 * (attempt + 1))
+    return wrapped
 
 
 def check_engine(engine, keys, settings=None):
@@ -898,7 +985,7 @@ def _ask_codex(exe, system, user):
         proc = _run_proc(
             [exe, "exec", "-", "--output-schema", schema, "-o", out, "--skip-git-repo-check",
              "--sandbox", "read-only", "--ephemeral"],
-            system + "\n\n" + user, cwd=tmp,
+            system + "\n\n" + user, cwd=tmp, timeout=LLM_TIMEOUT,
         )
         if proc.returncode != 0 or not os.path.exists(out):
             raise RuntimeError(t("codex_error", err=(proc.stderr or proc.stdout).strip()[-500:]))
@@ -921,31 +1008,47 @@ def _ask_openai(client, model, system, user):
     return _json_payload(resp.choices[0].message.content or "")["translations"]
 
 
-def _llm_cues(cues, system, context, log, ask, chunk=80, progress=lambda v: None, task="translate"):
-    """Napisy partiami do LLM (z kilkoma poprzednimi wynikami jako kontekst); brakujące id — jedna powtórka.
-    task: "translate" albo "correct" — tylko opis zadania w poleceniu i komunikat o brakach."""
+def _llm_cues(cues, system, context, log, ask, chunk=80, progress=lambda v: None, task="translate", jobs=1):
+    """Napisy partiami do LLM (z kilkoma poprzednimi napisami jako kontekst); brakujące id — jedna powtórka,
+    brak odpowiedzi w LLM_TIMEOUT — też jedna powtórka.
+    task: "translate" albo "correct" — tylko opis zadania w poleceniu i komunikat o brakach.
+    jobs > 1: partie równolegle; kontekstem są wtedy poprzednie napisy w oryginale (wyniki jeszcze nie istnieją)."""
+    from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
+
     done_word = "translated" if task == "translate" else "corrected"
     out = [Cue(c.start, c.end, c.text) for c in cues]
+    starts = range(0, len(cues), chunk)
+    finished = [0]
+    lock = threading.Lock()
 
-    for start in range(0, len(cues), chunk):
+    def ask_retry(user):
+        try:
+            return ask(system, user)
+        except LLMTimeout:
+            log(t("llm_timeout", s=LLM_TIMEOUT))
+            return ask(system, user)
+
+    def one(start):
         check_cancel()
-        progress(start / len(cues))
         batch = {i: cues[i].text for i in range(start, min(start + chunk, len(cues)))}
         if len(cues) > chunk:
             log(t("chunk", a=start + 1, b=start + len(batch)))
-        prev = [out[i].text for i in range(max(0, start - 5), start)]
         intro = ""
         if context.strip():
             intro += f"Context about this video (topic, names, glossary):\n{context.strip()}\n\n"
-        if prev:
-            intro += f"Previous cues, already {done_word} (for context only):\n{json.dumps(prev, ensure_ascii=False)}\n\n"
+        if start:
+            if jobs > 1:
+                prev, label = [cues[i].text for i in range(max(0, start - 5), start)], "original text"
+            else:
+                prev, label = [out[i].text for i in range(max(0, start - 5), start)], f"already {done_word}"
+            intro += f"Previous cues, {label} (for context only):\n{json.dumps(prev, ensure_ascii=False)}\n\n"
 
         missing = dict(batch)
         for attempt in range(2):
             user = intro + f"Cues to {task}:\n" + json.dumps(
                 [{"id": i, "text": t} for i, t in missing.items()], ensure_ascii=False)
             try:
-                items = list(ask(system, user))
+                items = list(ask_retry(user))
             except (ValueError, KeyError, TypeError, StopIteration) as e:  # odpowiedź nie jest oczekiwanym JSON-em
                 raise RuntimeError(t("bad_response", err=type(e).__name__)) from e
             for item in items:
@@ -959,6 +1062,34 @@ def _llm_cues(cues, system, context, log, ask, chunk=80, progress=lambda v: None
                 log(t("retry_missing", n=len(missing)))
         if missing:
             log(t("untranslated" if task == "translate" else "uncorrected", n=len(missing)))
+        with lock:
+            finished[0] += len(batch)
+            progress(finished[0] / len(cues))
+
+    progress(0.0)
+    if jobs > 1:
+        failed = threading.Event()
+
+        def guarded(start):
+            if failed.is_set():  # inna partia już padła — nie wysyłamy kolejnych zapytań
+                return
+            try:
+                one(start)
+            except BaseException:
+                failed.set()
+                raise
+
+        with ThreadPoolExecutor(jobs) as pool:
+            futures = [pool.submit(guarded, s) for s in starts]
+            wait(futures, return_when=FIRST_EXCEPTION)
+            for f in futures:
+                f.cancel()
+            for f in futures:  # pierwszy błąd w kolejności partii (pozostałe partie już nie ruszą)
+                if f.done() and not f.cancelled() and f.exception():
+                    raise f.exception()
+    else:
+        for start in starts:
+            one(start)
     return out
 
 
@@ -969,7 +1100,7 @@ def _ask_cli(exe, system, user):
          "--system-prompt", system, "--tools", "",
          # bez serwerów MCP, wtyczek i zapisu sesji użytkownika: start CLI ~2 s szybciej
          "--strict-mcp-config", "--no-session-persistence", "--no-chrome", "--disable-slash-commands"],
-        user,
+        user, timeout=LLM_TIMEOUT,
     )
     try:
         data = json.loads(proc.stdout)
@@ -1144,7 +1275,7 @@ def save_config(cfg):
     os.replace(tmp, CONFIG)
 
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 KEYRING_SERVICE = "subtitle-generator"
 OLD_KEYRING_SERVICE = "generator-napisow"  # nazwa z wersji przed 1.0
@@ -1216,6 +1347,8 @@ class Options:
     settings: dict | None = None          # modele / adresy silników LLM (openai_model, custom_url…)
     on_exists: object = None              # plik wynikowy istnieje: f(path) → 'overwrite' | 'copy' | 'skip'
     correct: bool = False                 # poprawka transkrypcji przez LLM (silnik = engine)
+    jobs: int = 1                         # partie jednego tłumaczenia wysyłane naraz
+    fps: float | None = None              # klatki/s dla napisów MicroDVD (None = z pliku albo 23.976)
 
 
 # względny czas etapów: rozpoznawanie mowy, poprawka transkrypcji, jedno tłumaczenie
@@ -1353,7 +1486,7 @@ def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda
         src = o.language
         if not src:
             raise RuntimeError(t("srt_needs_lang"))
-        cues = read_subs(path)
+        cues = read_subs(path, o.fps)
         log(t("loaded_srt", n=len(cues)))
     elif o.language in decided and decided[o.language] is None and o.fmt != "txt" and \
             os.path.exists(existing := os.path.join(folder, f"{name}.{o.language}.{o.fmt}")):
@@ -1402,7 +1535,8 @@ def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda
 
     def job(tgt):
         check_cancel()
-        result = translate(cues, src, tgt, o.engine, o.context, log, keys, o.settings, lambda v: report(tgt, v))
+        result = translate(cues, src, tgt, o.engine, o.context, log, keys, o.settings, lambda v: report(tgt, v),
+                           o.jobs)
         report(tgt, 1.0)
         return tgt, result
 

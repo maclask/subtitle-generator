@@ -411,6 +411,8 @@ class App(ctk.CTk, *([TkinterDnD.DnDWrapper] if TkinterDnD else [])):
         for p in paths:
             items = sorted(os.path.join(p, f) for f in os.listdir(p)) if os.path.isdir(p) else [p]
             for f in items:
+                if os.path.isdir(p) and f.lower().endswith(".txt") and not core.looks_like_subs(f):
+                    continue  # z folderu nie bierzemy notatek, README itp. — tylko .txt z napisami
                 if os.path.isfile(f) and f.lower().endswith(supported):
                     if f not in self.paths:
                         self.paths.append(f)

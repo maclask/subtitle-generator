@@ -33,6 +33,8 @@ Installation packages are available under [Releases](https://github.com/maclask/
 
 The command-line package does not require tkinter and is intended for systems without a desktop environment, such as servers.
 
+For translating existing subtitle files only (no speech recognition), install `requirements-translate.txt` instead of `requirements-cli.txt` into a virtual environment and run `cli.py` with it. This skips Whisper and the CUDA libraries (about 85 MB instead of several GB).
+
 ### Windows
 
 1. Install Python 3.13 from [python.org](https://www.python.org/downloads/), keeping the **py launcher** option selected.
@@ -98,7 +100,7 @@ API keys entered in the application are stored in the system credential store: C
 
 The interface language follows the system language (English or Polish; English for all other languages). The **PL / EN** switch changes the language, and the choice is saved.
 
-1. **Files** — add video or audio recordings, or existing `.srt`, `.vtt` or `.ass` subtitles (translation only, no transcription; set the subtitle language in **Spoken language**). Files can be dragged into the window; dragging a folder adds all supported files in it.
+1. **Files** — add video or audio recordings, or existing `.srt`, `.vtt`, `.ass` subtitles, or MicroDVD and MPL2 subtitles (`.sub`, `.txt`) (translation only, no transcription; set the subtitle language in **Spoken language**). Files can be dragged into the window; dragging a folder adds all supported files in it.
 2. **Speech recognition** — select the spoken language (detected automatically by default) and the model. If the selected language clearly does not match the recording, the detected language is used and a warning is shown in the log.
    The **Proofread with an LLM** option enables transcript proofreading: after transcription, the translator selected in the **Translation** section corrects misrecognized words, proper names and punctuation, using the **Context** field. Subtitle timing is unchanged, and translations are based on the corrected text. Corrections that deviate substantially from the original are rejected; if proofreading fails, the speech recognition output is saved.
 3. **Subtitle format** — file type, maximum characters per line and lines per subtitle.
@@ -126,6 +128,9 @@ generator-cli.bat video.mp4 -l en -t pl,de          # Windows
 | `--chars 42 --lines 2` | maximum characters per line and lines per subtitle |
 | `-o folder` | output folder (default: the source file's folder) |
 | `--overwrite` | overwrite existing files (by default a copy is saved, e.g. `video.en (2).srt`) |
+| `--jobs 4` | number of parts of one translation sent to the translator at once (default 1, at most 16; Ollama: 1); faster, at the cost of context between parts. Up to 4 target languages are translated at the same time, each with this many parts |
+| `--fps 25` | frame rate for MicroDVD subtitles (default: from the first line of the file, otherwise 23.976) |
+| `--json` | print messages, progress and saved files as JSON, one object per line (for use by other programs) |
 | `--ui-lang en` | message language: `en` or `pl` (defaults to the language chosen in the graphical interface, otherwise the system language) |
 
 ### Recommended editing workflow
@@ -154,6 +159,7 @@ Files are saved in the source file's folder as `name.<language code>.<extension>
 |---|---|
 | *GPU failed … falling back to CPU* | Update the NVIDIA driver. Transcription continues on the CPU. |
 | *Claude CLI: Failed to authenticate* | Run `claude` in a terminal and sign in with `/login`. |
+| *The translator did not respond within 240 s* | The part is retried once automatically. If it fails again, check the network connection and the translator (for Claude CLI: run `claude` and sign in). |
 | Slow translation with Ollama | Choose a smaller model that fits in GPU memory (e.g. 7–14B parameters). |
 | *No system keychain available* (Linux) | Install and unlock GNOME Keyring or KWallet, or set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `CUSTOM_API_KEY` or `DEEPL_API_KEY`. |
 | `setup` cannot find Python | Install Python 3.10–3.13; newer versions may not be supported by all dependencies. |

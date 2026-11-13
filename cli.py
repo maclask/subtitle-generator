@@ -1,5 +1,6 @@
 """Subtitle Generator / Generator napisów — command line."""
 import argparse
+import json
 import sys
 
 import core
@@ -18,7 +19,7 @@ i18n.S.update({
         "  generator-cli video.mp4                                 subtitles in the spoken language (detected)\n"
         "  generator-cli video.mp4 -l en -t pl,de                  EN + PL and DE translations\n"
         "  generator-cli video.en.srt -l en -t french -e deepl     translate an existing SRT only"),
-    "a_files": ("pliki wideo/audio lub napisy .srt/.vtt/.ass", "video/audio or .srt/.vtt/.ass subtitle files"),
+    "a_files": ("pliki wideo/audio lub napisy .srt/.vtt/.ass/.sub/.txt", "video/audio or .srt/.vtt/.ass/.sub/.txt subtitle files"),
     "a_lang": ("język mowy / napisów (kod lub nazwa), domyślnie auto",
                "spoken / subtitle language (code or name), default: auto"),
     "a_translate": ("języki docelowe po przecinku, np. en,de,kataloński",
@@ -45,11 +46,19 @@ i18n.S.update({
                        "Aby go pobrać, uruchom program w terminalu albo z opcją --download-model.",
                        "The {model} model is not downloaded — skipping video and audio files ({n}). "
                        "To download it, run the program in a terminal or with --download-model."),
+    "a_jobs": ("ile partii jednego tłumaczenia wysyłać naraz (1)", "how many parts of one translation to send at once (1)"),
+    "a_fps": ("klatki/s dla napisów MicroDVD (domyślnie z pliku albo 23.976)",
+              "frames per second for MicroDVD subtitles (default: from the file, otherwise 23.976)"),
+    "a_json": ("komunikaty i postęp jako JSON, jeden obiekt na linię (dla innych programów)",
+               "messages and progress as JSON, one object per line (for other programs)"),
     "a_list": ("pokaż obsługiwane języki", "list supported languages"),
     "a_ui": ("język komunikatów: pl lub en", "message language: pl or en"),
     "translator_is": ("Tłumacz: {info}", "Translator: {info}"),
     "claude_only": ("(bez DeepL)", "(not DeepL)"),
 })
+
+
+MAX_JOBS = 16  # górna granica --jobs (każda partia to osobny proces / zapytanie)
 
 
 def main():
@@ -76,6 +85,9 @@ def main():
     p.add_argument("--chars", type=int, default=42, help=t("a_chars"))
     p.add_argument("--lines", type=int, default=2, help=t("a_lines"))
     p.add_argument("--overwrite", action="store_true", help=t("a_overwrite"))
+    p.add_argument("--jobs", type=int, default=1, help=t("a_jobs"))
+    p.add_argument("--fps", type=float, help=t("a_fps"))
+    p.add_argument("--json", action="store_true", help=t("a_json"))
     p.add_argument("--list-languages", action="store_true", help=t("a_list"))
     p.add_argument("--ui-lang", choices=["pl", "en"], help=t("a_ui"))
     a = p.parse_args()
@@ -99,38 +111,49 @@ def main():
     opts = core.Options(language=lang, model=a.model, targets=targets, engine=engine, context=a.context,
                         chars=a.chars, lines=a.lines, fmt=a.format, out_dir=a.out_dir, keys=core.api_keys(cfg),
                         settings=settings, on_exists=(lambda p: "overwrite") if a.overwrite else None,
-                        correct=a.correct)
+                        correct=a.correct, jobs=min(max(1, a.jobs), MAX_JOBS), fps=a.fps)
+
+    if a.json:  # jeden obiekt JSON na linię — dla programów (np. dodatku do Stremio)
+        emit = lambda **kw: print(json.dumps(kw, ensure_ascii=False), flush=True)
+        log = lambda msg: emit(**{"error" if getattr(msg, "key", "") == "error" else "log": str(msg)})
+        error = lambda msg: emit(error=str(msg))
+        progress = lambda v, stage=None: v is not None and emit(progress=round(v, 3), stage=str(stage or ""))
+        saved = lambda path: emit(saved=path)
+    else:
+        log, progress, saved = print, _progress, lambda path: None
+        error = lambda msg: print(msg, file=sys.stderr)
+    nl = "" if a.json else "\n"  # w terminalu błąd zaczyna nową linię po pasku postępu
 
     if a.correct and engine == "deepl":
-        print(t("error", err=t("correct_deepl")), file=sys.stderr)
+        error(t("error", err=t("correct_deepl")))
         return 1
     if targets or a.correct:
         try:  # niedostępny tłumacz zgłaszamy przed transkrypcją
             core.check_engine(opts.engine, opts.keys, settings)
         except RuntimeError as e:
-            print(t("error", err=e), file=sys.stderr)
+            error(t("error", err=e))
             return 1
-        print(t("translator_is", info=core.engine_info(opts.engine, opts.keys, settings)))
+        log(t("translator_is", info=core.engine_info(opts.engine, opts.keys, settings)))
     failed, files = 0, list(a.files)
     media = [f for f in files if not core.is_subtitle(f)]
-    if media and not core.model_cached(a.model) and not _get_model(a.model, a.download_model):
+    if media and not core.model_cached(a.model) and not _get_model(a.model, a.download_model, log, error, nl):
         # bez modelu: pliki wideo/audio pomijamy, pliki napisów tłumaczymy
-        print(t("model_skip_cli", model=a.model, n=len(media)), file=sys.stderr)
+        error(t("model_skip_cli", model=a.model, n=len(media)))
         files = [f for f in files if core.is_subtitle(f)]
         failed += len(media)
     for path in files:
-        print(f"=== {path}")
+        log(f"=== {path}")
         try:
-            core.process_file(path, opts, print, _progress)
+            core.process_file(path, opts, log, progress, saved)
         except core.AlreadyReported:  # błędy tłumaczeń są już wypisane
             failed += 1
         except Exception as e:
-            print("\n" + t("error", err=e), file=sys.stderr)
+            error(nl + t("error", err=e))
             failed += 1
     return 1 if failed else 0
 
 
-def _get_model(model, without_asking):
+def _get_model(model, without_asking, log=print, error=print, nl="\n"):
     """Brak modelu Whisper: pobiera go po zgodzie (pytanie w terminalu) albo z opcją --download-model.
     Bez terminala (skrypt, potok) i bez tej opcji nic nie pobiera. Zwraca True, gdy model jest gotowy."""
     if not without_asking:
@@ -152,9 +175,9 @@ def _get_model(model, without_asking):
     try:
         core.download_model(model, progress)
     except RuntimeError as e:
-        print("\n" + t("error", err=e), file=sys.stderr)
+        error(nl + t("error", err=e))
         return False
-    print("\n" + t("model_downloaded", model=model))
+    log(nl + t("model_downloaded", model=model))
     return True
 
 

@@ -1,0 +1,4 @@
+anthropic>=1.13,<2
+deepl>=1.32,<2
+openai>=1.100,<3
+keyring>=25,<26
