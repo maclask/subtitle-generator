@@ -129,6 +129,7 @@ generator-cli.bat video.mp4 -l en -t pl,de          # Windows
 | `-o folder` | output folder (default: the source file's folder) |
 | `--overwrite` | overwrite existing files (by default a copy is saved, e.g. `video.en (2).srt`) |
 | `--jobs 4` | number of parts of one translation sent to the translator at once (default 1, at most 16; Ollama: 1); faster, at the cost of context between parts. Up to 4 target languages are translated at the same time, each with this many parts |
+| `--convert` | save a subtitle file in the `-f` format (e.g. MicroDVD → SRT), with or without translation; the input file is never overwritten |
 | `--fps 25` | frame rate for MicroDVD subtitles (default: from the first line of the file, otherwise 23.976) |
 | `--json` | print messages, progress and saved files as JSON, one object per line (for use by other programs) |
 | `--ui-lang en` | message language: `en` or `pl` (defaults to the language chosen in the graphical interface, otherwise the system language) |

@@ -1349,6 +1349,7 @@ class Options:
     correct: bool = False                 # poprawka transkrypcji przez LLM (silnik = engine)
     jobs: int = 1                         # partie jednego tłumaczenia wysyłane naraz
     fps: float | None = None              # klatki/s dla napisów MicroDVD (None = z pliku albo 23.976)
+    convert: bool = False                 # plik napisów → zapis w formacie fmt (obok tłumaczeń albo bez nich)
 
 
 # względny czas etapów: rozpoznawanie mowy, poprawka transkrypcji, jedno tłumaczenie
@@ -1422,7 +1423,10 @@ def plan_outputs(path, o, log, progress=lambda v, stage=None: None, reserved=Non
     folder, name = _names(path, o, src)
     if media and not src and any(os.path.exists(os.path.join(folder, f"{name}.{c}.{o.fmt}")) for c in LANGUAGES):
         src = detect_language(path, o.model, log, progress)
-    langs = ([src] if media and src else []) + unique_targets(o.targets, src)
+    langs = ([src] if (media or o.convert) and src else []) + unique_targets(o.targets, src)
+    if o.convert and not media:  # konwersja nie może nadpisać pliku wejściowego (film.pl.srt → film.pl.srt)
+        reserved = set() if reserved is None else reserved
+        reserved.add(_norm(path))
     out = {}
     for lang in langs:
         check_cancel()
@@ -1488,6 +1492,11 @@ def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda
             raise RuntimeError(t("srt_needs_lang"))
         cues = read_subs(path, o.fps)
         log(t("loaded_srt", n=len(cues)))
+        if o.convert:
+            out = resolve(os.path.join(folder, f"{name}.{file_suffix(src)}.{o.fmt}"), src)
+            if out and _norm(out) == _norm(path):
+                out = free_name(out)
+            save(cues, out, lambda out: t("saved_n", path=out, n=len(cues)), src, resolved=True)
     elif o.language in decided and decided[o.language] is None and o.fmt != "txt" and \
             os.path.exists(existing := os.path.join(folder, f"{name}.{o.language}.{o.fmt}")):
         # transkrypcja już jest i ma zostać — tłumaczymy ją zamiast rozpoznawać mowę od nowa

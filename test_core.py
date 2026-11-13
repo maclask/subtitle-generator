@@ -104,6 +104,21 @@ def test_api_retries():
         _t.sleep = real_sleep
 
 
+def test_convert():
+    folder = tempfile.mkdtemp()
+    src = os.path.join(folder, "film.pl.txt")
+    with open(src, "w", encoding="cp1250") as f:
+        f.write("{1}{1}25\n{25}{50}Zażółć|gęślą jaźń\n")
+    o = core.Options(language="pl", convert=True, on_exists=lambda p: "overwrite")
+    out = core.process_file(src, o, lambda m: None, plan=core.plan_outputs(src, o, lambda m: None))
+    assert out == [os.path.join(folder, "film.pl.srt")], out
+    with open(out[0], encoding="utf-8") as f:
+        assert f.read() == "1\n00:00:01,000 --> 00:00:02,000\nZażółć gęślą jaźń\n\n"
+    # input already SRT with the same name: never overwritten, even with "overwrite"
+    out2 = core.process_file(out[0], o, lambda m: None)
+    assert out2 == [os.path.join(folder, "film.pl (2).srt")], out2
+
+
 def test_proc_timeout():
     started = time.monotonic()
     try:

@@ -51,6 +51,8 @@ i18n.S.update({
               "frames per second for MicroDVD subtitles (default: from the file, otherwise 23.976)"),
     "a_json": ("komunikaty i postęp jako JSON, jeden obiekt na linię (dla innych programów)",
                "messages and progress as JSON, one object per line (for other programs)"),
+    "a_convert": ("zapisz plik napisów w formacie z -f (np. MicroDVD → SRT), także bez tłumaczenia",
+                  "save the subtitle file in the -f format (e.g. MicroDVD → SRT), also without translating"),
     "a_list": ("pokaż obsługiwane języki", "list supported languages"),
     "a_ui": ("język komunikatów: pl lub en", "message language: pl or en"),
     "translator_is": ("Tłumacz: {info}", "Translator: {info}"),
@@ -87,6 +89,7 @@ def main():
     p.add_argument("--overwrite", action="store_true", help=t("a_overwrite"))
     p.add_argument("--jobs", type=int, default=1, help=t("a_jobs"))
     p.add_argument("--fps", type=float, help=t("a_fps"))
+    p.add_argument("--convert", action="store_true", help=t("a_convert"))
     p.add_argument("--json", action="store_true", help=t("a_json"))
     p.add_argument("--list-languages", action="store_true", help=t("a_list"))
     p.add_argument("--ui-lang", choices=["pl", "en"], help=t("a_ui"))
@@ -111,7 +114,8 @@ def main():
     opts = core.Options(language=lang, model=a.model, targets=targets, engine=engine, context=a.context,
                         chars=a.chars, lines=a.lines, fmt=a.format, out_dir=a.out_dir, keys=core.api_keys(cfg),
                         settings=settings, on_exists=(lambda p: "overwrite") if a.overwrite else None,
-                        correct=a.correct, jobs=min(max(1, a.jobs), MAX_JOBS), fps=a.fps)
+                        correct=a.correct, jobs=min(max(1, a.jobs), MAX_JOBS), fps=a.fps,
+                        convert=a.convert)
 
     if a.json:  # jeden obiekt JSON na linię — dla programów (np. dodatku do Stremio)
         emit = lambda **kw: print(json.dumps(kw, ensure_ascii=False), flush=True)

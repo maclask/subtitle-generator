@@ -61,6 +61,7 @@ README exists in EN (`README.md`) and PL (`README.pl.md`) — keep both in sync,
   settings, on_exists, correct). `plan_outputs` (asks about existing files up front) →
   `process_file` (transcribe or read subs → optional `correct` → save source → parallel translations).
   Output names `name.<lang>.<fmt>`; `output_path`/`free_name` give `name.en (2).srt` copies.
+  `Options.convert` (CLI `--convert`): subtitle input is also saved as `name.<src>.<fmt>`; never overwrites the input.
   Progress weights `STT_WEIGHT`, `CORRECT_WEIGHT`, `TRANSLATE_WEIGHT`; progress never goes backwards.
 
 ## gui.py structure

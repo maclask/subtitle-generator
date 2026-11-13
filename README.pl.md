@@ -129,6 +129,7 @@ generator-cli.bat film.mp4 -l pl -t en,de          # Windows
 | `-o katalog` | katalog wyjściowy (domyślnie katalog pliku źródłowego) |
 | `--overwrite` | nadpisywanie istniejących plików (domyślnie zapisywana jest kopia, np. `film.en (2).srt`) |
 | `--jobs 4` | liczba części jednego tłumaczenia wysyłanych do tłumacza jednocześnie (domyślnie 1, najwyżej 16; Ollama: 1); szybciej, kosztem kontekstu między częściami. Do 4 języków docelowych jest tłumaczonych jednocześnie, każdy w tylu częściach |
+| `--convert` | zapis pliku napisów w formacie z `-f` (np. MicroDVD → SRT), z tłumaczeniem lub bez; plik wejściowy nigdy nie jest nadpisywany |
 | `--fps 25` | liczba klatek na sekundę dla napisów MicroDVD (domyślnie z pierwszej linii pliku, w przeciwnym razie 23,976) |
 | `--json` | komunikaty, postęp i zapisane pliki jako JSON, jeden obiekt na linię (do użycia przez inne programy) |
 | `--ui-lang pl` | język komunikatów: `pl` lub `en` (domyślnie język wybrany w interfejsie graficznym, a w jego braku język systemu) |
