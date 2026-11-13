@@ -794,8 +794,11 @@ SYSTEM = """You are a professional subtitle translator for video. Translate subt
 - Return exactly one translation for every id you receive, with the same ids.
 - Each cue is timed to speech, so keep each cue's meaning in that cue. Move a word to a neighbouring cue only when {tgt} grammar requires it.
 - Write natural, concise spoken {tgt} that is easy to read quickly on screen; shorten filler words if needed.
-- The source is automatic speech recognition and may contain mistakes. Translate what the speaker most likely meant.
-- Keep names, numbers and brand names unless the context says otherwise. No line breaks, no notes or comments."""
+{source_note}- Keep names, numbers and brand names unless the context says otherwise. No line breaks, no notes or comments."""
+
+
+ASR_NOTE = "- The source is automatic speech recognition and may contain mistakes. Translate what the speaker most likely meant.\n"
+HUMAN_NOTE = "- The source is human-written subtitles. Keep their tone and register; do not add or drop content.\n"
 
 
 def _llm_lang(code):
@@ -850,13 +853,14 @@ def engine_setting(settings, engine, field):
     return (settings or {}).get(key) or DEFAULTS.get(key, "")
 
 
-def translate(cues, src, tgt, engine, context, log, keys, settings=None, progress=lambda v: None, jobs=1):
-    """engine: klucz z ENGINES; keys: klucze API; settings: modele / adresy (openai_model, custom_url…); jobs: partie naraz."""
+def translate(cues, src, tgt, engine, context, log, keys, settings=None, progress=lambda v: None, jobs=1, asr=True):
+    """engine: klucz z ENGINES; keys: klucze API; settings: modele / adresy (openai_model, custom_url…); jobs: partie naraz;
+    asr: źródło to rozpoznawanie mowy (False = napisy pisane przez ludzi)."""
     log(t("translating", src=lang_name(src), tgt=lang_name(tgt), engine=ENGINES[engine], n=len(cues)))
     if engine == "deepl":
         return _translate_deepl(cues, src, tgt, context, keys.get("deepl", ""), progress)
     ask, chunk = _llm(engine, keys, settings)
-    system = SYSTEM.format(src=_llm_lang(src), tgt=_llm_lang(tgt))
+    system = SYSTEM.format(src=_llm_lang(src), tgt=_llm_lang(tgt), source_note=ASR_NOTE if asr else HUMAN_NOTE)
     jobs = min(jobs, PARALLEL.get(engine, jobs))  # np. Ollama na jednym GPU: jedno zapytanie naraz
     return _llm_cues(cues, system, context, log, ask, chunk, progress, jobs=jobs)
 
@@ -1275,7 +1279,7 @@ def save_config(cfg):
     os.replace(tmp, CONFIG)
 
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 KEYRING_SERVICE = "subtitle-generator"
 OLD_KEYRING_SERVICE = "generator-napisow"  # nazwa z wersji przed 1.0
@@ -1545,7 +1549,7 @@ def process_file(path, o, log, progress=lambda v, stage=None: None, saved=lambda
     def job(tgt):
         check_cancel()
         result = translate(cues, src, tgt, o.engine, o.context, log, keys, o.settings, lambda v: report(tgt, v),
-                           o.jobs)
+                           o.jobs, asr=bool(media))
         report(tgt, 1.0)
         return tgt, result
 

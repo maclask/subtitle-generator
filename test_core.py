@@ -119,6 +119,26 @@ def test_convert():
     assert out2 == [os.path.join(folder, "film.pl (2).srt")], out2
 
 
+def test_human_source_prompt():
+    import json
+    systems = []
+
+    def ask(system, user):
+        systems.append(system)
+        items = json.loads(user.split("Cues to translate:\n")[1])
+        return [{"id": x["id"], "text": x["text"]} for x in items]
+
+    real = core._llm
+    core._llm = lambda *a, **k: (ask, 80)
+    try:
+        src = write("1\n00:00:01,000 --> 00:00:02,000\nHello\n", ".srt")
+        o = core.Options(language="en", targets=("pl",), on_exists=lambda p: "overwrite")
+        core.process_file(src, o, lambda m: None)
+    finally:
+        core._llm = real
+    assert systems and "human-written" in systems[0] and "speech recognition" not in systems[0], systems
+
+
 def test_proc_timeout():
     started = time.monotonic()
     try:
